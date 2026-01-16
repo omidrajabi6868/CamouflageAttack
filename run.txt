@@ -1,0 +1,42 @@
+Dpatch one class:
+crun python TheMain.py --dataset_name airbus --attack_name Dpatch --batch_size 16 --learning_rate 1e-1 --output_dir /home/oraja001/airbus_ship/AdversarialProject/outputs/mask_rcnn_R_101_FPN_3x_one_class/ --model_path /home/oraja001/airbus_ship/AdversarialProject/trained_models/mask_rcnn_R_101_FPN_3x/model_final_ship.pth --model_config COCO-InstanceSegmentation/mask_rcnn_R_101_FPN_3x.yaml --attack_loss ss --save_name Dpatch_ship
+
+Dpatch multiclass:
+crun python TheMain.py --dataset_name airbus --attack_name Dpatch --multiclass True --batch_size 16 --learning_rate 1e-1 --category_id 5 --random_id True --num_classes 80 --output_dir /home/oraja001/airbus_ship/AdversarialProject/outputs/mask_rcnn_R_101_FPN_3x_multi_class/ --model_path /home/oraja001/airbus_ship/AdversarialProject/trained_models/mask_rcnn_R_101_FPN_3x/model_multiclass.pth --model_config COCO-InstanceSegmentation/mask_rcnn_R_101_FPN_3x.yaml --attack_loss ss_multiclass --save_name Dpatch_multiclass
+
+Google one class:
+crun python TheMain.py --dataset_name airbus --attack_name google --batch_size 16 --learning_rate 1e-1 --output_dir /home/oraja001/airbus_ship/AdversarialProject/outputs/mask_rcnn_R_101_FPN_3x_one_class/ --model_path /home/oraja001/airbus_ship/AdversarialProject/trained_models/mask_rcnn_R_101_FPN_3x/model_final_ship.pth --model_config COCO-InstanceSegmentation/mask_rcnn_R_101_FPN_3x.yaml --attack_loss go --save_name google_ship
+
+ShapeShifter one class:
+crun python TheMain.py --dataset_name airbus --attack_name shapeShifter --batch_size 16 --learning_rate 1e-1 --output_dir /home/oraja001/airbus_ship/AdversarialProject/outputs/mask_rcnn_R_101_FPN_3x_one_class/ --model_path /home/oraja001/airbus_ship/AdversarialProject/trained_models/mask_rcnn_R_101_FPN_3x/model_final_ship.pth --model_config COCO-InstanceSegmentation/mask_rcnn_R_101_FPN_3x.yaml --attack_loss ss --save_name shapeShifter_ship
+
+ScaleAdaptive one class:
+crun python TheMain.py --dataset_name airbus --attack_name scaleAdaptive --batch_size 16 --learning_rate 1e-1 --output_dir /home/oraja001/airbus_ship/AdversarialProject/outputs/mask_rcnn_R_101_FPN_3x_one_class/ --model_path /home/oraja001/airbus_ship/AdversarialProject/trained_models/mask_rcnn_R_101_FPN_3x/model_final_ship.pth --model_config COCO-InstanceSegmentation/mask_rcnn_R_101_FPN_3x.yaml --attack_loss sa --save_name scaleAdaptive_ship
+
+ShapeAware one class equally_weighted:
+crun python TheMain.py --dataset_name airbus --attack_name shapeAware --batch_size 16 --learning_rate 1e-3 --output_dir /home/oraja001/airbus_ship/AdversarialProject/outputs/mask_rcnn_R_101_FPN_3x_one_class/ --model_path /home/oraja001/airbus_ship/AdversarialProject/trained_models/mask_rcnn_R_101_FPN_3x/model_final_ship.pth --model_config COCO-InstanceSegmentation/mask_rcnn_R_101_FPN_3x.yaml --attack_loss equally_weighted --save_name equally_weighted_ship
+
+ShapeAware one class fixed_weighted:
+crun python TheMain.py --dataset_name airbus --attack_name shapeAware --batch_size 16 --optimizer Adagrad --learning_rate 1e-3 --output_dir /home/oraja001/airbus_ship/AdversarialProject/outputs/mask_rcnn_R_101_FPN_3x_one_class/ --model_path /home/oraja001/airbus_ship/AdversarialProject/trained_models/mask_rcnn_R_101_FPN_3x/model_final_ship.pth --model_config COCO-InstanceSegmentation/mask_rcnn_R_101_FPN_3x.yaml --attack_loss fixed_weighted --save_name fixed_weighted_ship
+
+ShapeAware one class random_sampling:
+crun python TheMain.py --dataset_name airbus --attack_name shapeAware --batch_size 16 --learning_rate 1e-3 --output_dir /home/oraja001/airbus_ship/AdversarialProject/outputs/mask_rcnn_R_101_FPN_3x_one_class/ --model_path /home/oraja001/airbus_ship/AdversarialProject/trained_models/mask_rcnn_R_101_FPN_3x/model_final_ship.pth --model_config COCO-InstanceSegmentation/mask_rcnn_R_101_FPN_3x.yaml --attack_loss random_sampling --save_name random_sampling_ship
+
+ShapeAware one class grad_norm:
+crun python TheMain.py --dataset_name airbus --attack_name shapeAware --batch_size 16 --optimizer Adagrad --learning_rate 1e-3 --output_dir /home/oraja001/airbus_ship/AdversarialProject/outputs/mask_rcnn_R_101_FPN_3x_one_class/ --model_path /home/oraja001/airbus_ship/AdversarialProject/trained_models/mask_rcnn_R_101_FPN_3x/model_final_ship.pth --model_config COCO-InstanceSegmentation/mask_rcnn_R_101_FPN_3x.yaml --attack_loss grad_norm --save_name grad_norm_ship
+
+Train ViT model
+crun python Train.py --dataset_name airbus --batch_size 32 --learning_rate 1e-4 --output_dir /home/oraja001/airbus_ship/AdversarialProject/outputs/mask_rcnn_vitdet/ --model_path /home/oraja001/airbus_ship/AdversarialProject/trained_models/mask_rcnn_vitdet/model_final_61ccd1.pkl --model_config /home/oraja001/airbus_ship/detectron2/projects/ViTDet/configs/COCO/mask_rcnn_vitdet_b_100ep.py --transformer_based True
+
+Train MViT model
+crun python Train.py --dataset_name airbus --batch_size 32 --learning_rate 1e-4 --output_dir /home/oraja001/airbus_ship/AdversarialProject/outputs/mvitv2_maskrcnn/ --model_path /home/oraja001/airbus_ship/AdversarialProject/trained_models/mvitv2_maskrcnn/model_final_1a1c30.pkl --model_config /home/oraja001/airbus_ship/detectron2/projects/MViTv2/configs/mask_rcnn_mvitv2_t_3x.py --transformer_based True
+
+Train Swin model
+crun python Train.py \
+    --dataset_name airbus \
+    --batch_size 32 \
+    --learning_rate 1e-4 \
+    --output_dir /home/oraja001/airbus_ship/AdversarialProject/outputs/cascade_mask_rcnn_swin/ \
+    --model_path /home/oraja001/airbus_ship/AdversarialProject/trained_models/cascade_mask_rcnn_swin/model_final_246a82.pkl \
+    --model_config /home/oraja001/airbus_ship/detectron2/projects/ViTDet/configs/COCO/cascade_mask_rcnn_swin_b_in21k_50ep.py \
+    --transformer_based True

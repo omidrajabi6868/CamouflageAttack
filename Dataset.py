@@ -1,0 +1,267 @@
+import numpy as np
+import pandas as pd
+import cv2
+import detectron2.data.transforms as T
+import random
+
+from sklearn.model_selection import train_test_split
+from utils import rle_decode, mask_to_bbox, mask_to_polygons
+
+from detectron2.structures import BoxMode
+from detectron2.config import get_cfg
+from detectron2.data import build_detection_train_loader, build_detection_test_loader, DatasetMapper, DatasetFromList, MapDataset
+from detectron2.data import get_detection_dataset_dicts
+from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
+
+
+class Dataset:
+    def __init__(self, name, category_id, random_id=False):
+        self.name = name
+        self.category_id = category_id
+        self.random_id = random_id
+
+    def airbus_df(self):
+        masks = pd.read_csv('/home/oraja001/airbus_ship/train_ship_segmentations_v2.csv')
+        print('Total number of images (original): %d' % masks['ImageId'].value_counts().shape[0])
+
+        masks = masks[~masks['ImageId'].isin(['6384c3e78.jpg'])]  # remove corrupted file
+        unique_img_ids = masks.groupby('ImageId').size().reset_index(name='counts')
+        print('Total number of images (after removing corrupted images): %d' % masks['ImageId'].value_counts().shape[0])
+
+        # Count number of ships per image
+        df_wships = masks.dropna()
+        df_wships = df_wships.groupby('ImageId').size().reset_index(name='counts')
+        df_woships = masks[masks['EncodedPixels'].isna()]
+
+        print('Number of images with ships : %d | Number of images without ships : %d  (x%0.1f)' \
+          % (df_wships.shape[0], df_woships.shape[0], df_woships.shape[0] / df_wships.shape[0]))
+
+        masks = masks.dropna()
+        df_woships = masks[masks['EncodedPixels'].isna()]
+
+        df_w15ships = df_wships.loc[df_wships['counts'] == 15]
+        list_w15ships = df_w15ships.values.tolist()
+
+        # Split dataset into training and validation sets
+        # statritify : same histograms of numbe of ships
+        masks = masks[~masks['EncodedPixels'].isna()]
+        masks = masks[masks['EncodedPixels'].apply(lambda x: len(x.split(' ')) > 100)]
+        unique_img_ids = masks[~masks['EncodedPixels'].isna()].groupby('ImageId').size().reset_index(name='counts')
+        unique_img_ids = unique_img_ids[unique_img_ids['counts'] >= 1]
+
+        train_ids, val_ids = train_test_split(unique_img_ids, test_size=0.1,
+                                            random_state=42)
+        train_df = pd.merge(masks, train_ids)
+        valid_df = pd.merge(masks, val_ids)
+
+        train_df['counts'] = train_df.apply(lambda c_row: c_row['counts'] if isinstance(c_row['EncodedPixels'], str) else 0, 1)
+        valid_df['counts'] = valid_df.apply(lambda c_row: c_row['counts'] if isinstance(c_row['EncodedPixels'], str) else 0, 1)
+
+        return train_df, valid_df
+
+    def airbus_dicts(self, df, img_dir):
+        dataset_dicts = []
+        ImageIds = []
+        for item in df.iterrows():
+            if self.random_id:
+                self.category_id = random.choice([i for i in range(80) if i != 8])
+
+            record = {}
+            filename = item[1]['ImageId']
+            if filename in ImageIds:
+                continue
+            ImageIds.append(filename)
+            img = cv2.imread(f'{img_dir}/{filename}')
+            height, width = img.shape[:2]
+            record['file_name'] = f'{img_dir}/{filename}'
+            record['image_id'] = len(dataset_dicts)
+            record['height'] = height
+            record['width'] = width
+
+            # Get binary mask
+            masks_val = df.loc[df['ImageId'] == str(filename), 'EncodedPixels'].tolist()
+
+            objs = []
+            for rle_mask in masks_val:
+                obj = {}
+                mask = rle_decode(rle_mask)
+                bbox = mask_to_bbox(mask)
+                obj['bbox'] = bbox
+                obj['bbox_mode'] = BoxMode.XYXY_ABS
+                obj["category_id"] = self.category_id
+
+                polygons = mask_to_polygons(mask)
+                if len(polygons[0]) < 6:
+                    continue
+                obj['segmentation'] = polygons
+                objs.append(obj)
+            record['annotations'] = objs
+
+            dataset_dicts.append(record)
+
+        return dataset_dicts
+
+    def airbus_df_loaders(self, train_df, valid_df, BATCH_SZ_TRAIN, BATCH_SZ_VALID):
+    
+        # Data augmentation
+        train_transform = DualCompose([HorizontalFlip(), VerticalFlip()])
+        val_transform = DualCompose([])
+        val_poison_transform = DualCompose([Val_Poison(parameters_name), CenterCrop((512, 512, 3))])
+
+        # Initialize dataset
+        train_dataset = AirbusDataset(train_df, transform=train_transform, mode='train')
+        val_dataset = AirbusDataset(valid_df, transform=val_transform, mode='validation')
+        poison_dataset = AirbusDataset(valid_df, transform=val_poison_transform, mode='validation')
+
+        print('Train samples : %d | Validation samples : %d' % (len(train_dataset), len(val_dataset)))
+
+        # Get loaders
+        train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=BATCH_SZ_TRAIN, shuffle=True, num_workers=0)
+        val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=BATCH_SZ_VALID, shuffle=False, num_workers=0)
+        poison_loader = torch.utils.data.DataLoader(poison_dataset, batch_size=BATCH_SZ_VALID, shuffle=True, num_workers=0)
+
+        return train_loader, val_loader, poison_loader
+
+    def build_finite_loader(self, cfg):
+
+        train_dataset_dicts = get_detection_dataset_dicts([cfg.DATASETS.TRAIN[0]], filter_empty=True)
+        val_dataset_dicts = get_detection_dataset_dicts([cfg.DATASETS.TEST[0]], filter_empty=True)
+
+        # Define augmentations
+        augmentations = [
+            T.RandomBrightness(0.8, 1.2),
+            T.RandomContrast(0.8, 1.2),
+            T.RandomSaturation(0.8, 1.2),
+            T.RandomFlip(horizontal=True, vertical=False),
+        ]
+
+        # Mapper for augmentation/preprocessing
+        train_mapper = DatasetMapper(cfg, is_train=True, augmentations=augmentations)
+        val_mapper = DatasetMapper(cfg, is_train=True, augmentations=[])
+
+        train_dataset = DatasetFromList(train_dataset_dicts, copy=False)
+        train_dataset = MapDataset(train_dataset, train_mapper)
+
+        val_dataset = DatasetFromList(val_dataset_dicts, copy=False)
+        val_dataset = MapDataset(val_dataset, val_mapper)
+
+        # Choose finite sampler
+        train_sampler = RandomSampler(train_dataset)
+        val_sampler = SequentialSampler(val_dataset)
+
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=cfg.SOLVER.IMS_PER_BATCH,
+            sampler=train_sampler,
+            collate_fn=lambda x: x  # detectron2 expects list of dicts
+        )
+
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=cfg.SOLVER.IMS_PER_BATCH,
+            sampler=val_sampler,
+            collate_fn=lambda x: x  # detectron2 expects list of dicts
+        )
+        
+        return train_loader, val_loader
+
+    def dota_dicts(self, img_dir, imgids):
+        dataset_dicts = []
+        ImageIds = []
+        for imgid in imgids:
+            record ={}
+            filename = imgid
+            if filename in ImageIds:
+                continue
+            ImageIds.append(filename)
+            img = imread(f'{img_dir}/{filename}.png')
+            height, width = img.shape[:2]
+            record['file_name'] = f'{img_dir}/{filename}.png'
+            record['image_id'] = len(dataset_dicts)
+            record['height'] = height
+            record['width'] = width
+
+            if 'train' in basepath:
+                anns = examplesplit_train.loadAnns(imgId=imgid)
+            else:
+                anns = examplesplit_valid.loadAnns(imgId=imgid)
+            objs = []
+            for ann in anns:
+                obj={}
+                if ann['name'] != category:
+                    continue
+                poly = TuplePoly2Poly(ann['poly'])
+                xmin, ymin, xmax, ymax = min(poly[0::2]), min(poly[1::2]), max(poly[0::2]), max(poly[1::2])
+                width, height = xmax - xmin, ymax - ymin
+                obj['bbox'] = xmin, ymin, xmax, ymax
+                obj['bbox_mode'] = BoxMode.XYXY_ABS
+                obj["category_id"] = self.category_id
+                obj['segmentation'] = [poly]
+                objs.append(obj)
+            record['annotations'] = objs
+
+            # Collect and draw all polygons
+            polygons = []
+            for ann in record['annotations']:
+                segmentation = ann['segmentation']  # Flat list of 8 floats (4 points)
+                poly = np.array(segmentation, dtype=np.int32).reshape((-1, 2))     # (4, 2)
+                poly = poly.reshape((-1, 1, 2))  # (4, 1, 2) required by OpenCV
+                polygons.append(poly)
+
+            record['polygons'] = polygons
+
+            dataset_dicts.append(record)
+        
+        return dataset_dicts
+    
+    def visdrone_dicts(self, img_paths):
+        dataset_dicts = []
+        ImageIds = []
+        for img_path in img_paths:
+            record ={}
+            filename = img_path.split('/')[-1][:-4]
+            if filename in ImageIds:
+                continue
+            ImageIds.append(filename)
+            img = cv2.imread(img_path)
+            height, width = img.shape[:2]
+            record['file_name'] = img_path
+            record['image_id'] = len(dataset_dicts)
+            record['height'] = height
+            record['width'] = width
+
+            with open('/'.join((img_path.split('/')[:-2] + ['annotations', f'{filename}.txt'])), 'r') as f:
+                anns = [line.strip() for line in f if line.strip()]
+
+            objs = []
+            for ann in anns:
+                obj={}
+                ann = ann.split(',')
+                x, y, bw, bh, cls = map(float, ann[:4] + [ann[5]])
+                cls = int(cls)
+                if cls != 4:
+                    continue
+                # poly = TuplePoly2Poly(ann['poly'])
+                # xmin, ymin, xmax, ymax = min(poly[0::2]), min(poly[1::2]), max(poly[0::2]), max(poly[1::2])
+                # width, height = xmax - xmin, ymax - ymin
+                seg, xyxy, mode = bbox_to_polygon([x, y, bw, bh], BoxMode.XYWH_ABS)
+                obj['bbox'] = xyxy
+                obj['bbox_mode'] = mode
+                obj["category_id"] = self.category_id
+                obj['segmentation'] = [seg]
+                objs.append(obj)
+            record['annotations'] = objs
+
+            # Collect and draw all polygons
+            polygons = []
+            for ann in record['annotations']:
+                segmentation = ann['segmentation']  # Flat list of 8 floats (4 points)
+                poly = np.array(segmentation, dtype=np.int32).reshape((-1, 2))     # (4, 2)
+                poly = poly.reshape((-1, 1, 2))  # (4, 1, 2) required by OpenCV
+                polygons.append(poly)
+
+            record['polygons'] = polygons
+
+            dataset_dicts.append(record)
+        
+        return dataset_dicts
