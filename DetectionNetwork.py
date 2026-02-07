@@ -21,6 +21,8 @@ from detectron2.data import transforms as T
 from fvcore.nn import giou_loss, smooth_l1_loss
 from detectron2.layers import cat, diou_loss
 from pathlib import Path
+from YOLO import YOLO
+from utils import load_yaml, load_pretrained_yolo
 
 @PROPOSAL_GENERATOR_REGISTRY.register()
 class CustomRPN(RPN):
@@ -308,4 +310,19 @@ class DetectionNetwork:
 
         DetectionCheckpointer(model).load(self.model_path)
         
+        return model, cfg
+
+    def yolo_model_net(self, model_config, train_data_len, pretrained="/home/oraja001/airbus_ship/AdversarialProject/trained_models/yolo/yolov8l.pt"):
+
+        cfg = load_yaml(model_config)
+
+        model = YOLO(
+            model_size=cfg["model"]["size"],
+            num_classes=self.num_classes,
+            reg_max=cfg["model"]["reg_max"],
+        )
+
+        if pretrained:
+            model = load_pretrained_yolo(model, pretrained)
+
         return model, cfg

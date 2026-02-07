@@ -4,7 +4,7 @@ from torch.distributions import Categorical
 
 class PPO:
     def __init__(self):
-        self.action_values = torch.tensor([0.001, 0.01, 0.8, 1.0, 1.25, 10, 100])
+        self.action_values = torch.tensor([0.0008, 0.001, 0.008, 0.01, 0.8, 1.0, 1.25, 5, 10, 50, 100])
         self.num_actions = len(self.action_values)
         self.controller = PPOController(state_dim=4, NUM_ACTIONS=self.num_actions)
         self.buffer =  RolloutBuffer()

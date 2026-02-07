@@ -88,8 +88,8 @@ class Attack:
 
         adv_seg_loss = self.segmentation_loss(seg_outputs, target_masks)*lambdas['seg']
 
-        # adv_loss = adv_rpn_cls + adv_rpn_loc + adv_feature_loss + adv_seg_loss + adv_roi_cls + adv_roi_loc + adv_loss_mask
-        adv_loss = adv_roi_cls + adv_roi_loc + adv_feature_loss + adv_seg_loss + adv_loss_mask
+        adv_loss = adv_rpn_cls + adv_rpn_loc + adv_feature_loss + adv_seg_loss + adv_roi_cls + adv_roi_loc + adv_loss_mask
+        # adv_loss = adv_roi_cls + adv_roi_loc + adv_feature_loss + adv_seg_loss + adv_loss_mask
 
         return adv_loss
     
@@ -264,7 +264,7 @@ class Attack:
 
         if self.attack_loss == "rl_optimization":
             ppo = PPO()
-            ppo_optimizer = torch.optim.Adam(ppo.controller.parameters(), lr=3e-4)
+            ppo_optimizer = torch.optim.Adam(ppo.controller.parameters(), lr=1e-3)
 
         print(f"Number of parameters to be trained is: {parameters_count}")
         optimizer = self.optimizer
@@ -302,7 +302,7 @@ class Attack:
                 else:
                     adv_image = None
 
-                adversarial_example['image'] = (adv_image.to(self.device) + self.mean[0].to(self.device)).clamp(0, 255)
+                adversarial_example['image'] = (adv_image.to(self.device) + self.mean[0].to(self.device)).clamp(0, 255).requires_grad_(True)
                 adversarial_example['height'] = adv_image.shape[1]
                 adversarial_example['width'] = adv_image.shape[2]
                 
@@ -346,7 +346,6 @@ class Attack:
                         patch = parameter_render(patch_param.unsqueeze(0)).squeeze()
                     else:
                         patch = patch_param*1
-
                     adversarial_data, patch = make_adversarial_examples(batch_inputs, patch)
                     if len(adversarial_data) == 0:
                         continue
@@ -367,7 +366,7 @@ class Attack:
                             [polygons_to_binary_mask(d['instances'].gt_masks.polygons, d['image'].shape[1], d['image'].shape[2]) for d in batch_inputs]
                         ).unsqueeze(1).to(self.device)
 
-                        adversarial_images = [adv_d['image'] for adv_d in adversarial_data]
+                        adversarial_images = [adv_d['image'].requires_grad_(True) for adv_d in adversarial_data]
                         gt_instances = [x['instances'].to(self.device) for x in adversarial_data]
                         adv_inputs_for_detection = ImageList.from_tensors(adversarial_images)
                         clean_images = [clean_d['image'].float() for clean_d in batch_inputs]
@@ -519,8 +518,10 @@ class Attack:
 
                         val_loss.append(np.mean(losses))
                         logger.info('val loss: {:.5f}'.format(np.mean(losses)))
+
+                        torch.save(patch.cpu(), f'/home/oraja001/airbus_ship/AdversarialProject/outputs/{self.save_name}.pt')
                         if val_loss[-1] < best_loss:
                             best_loss = val_loss[-1]
-                            torch.save(patch.cpu(), f'/home/oraja001/airbus_ship/AdversarialProject/outputs/{self.save_name}.pt')
+                            torch.save(patch.cpu(), f'/home/oraja001/airbus_ship/AdversarialProject/outputs/{self.save_name}_best.pt')
 
         return patch

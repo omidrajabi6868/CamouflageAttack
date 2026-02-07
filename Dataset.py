@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+import torch
 import cv2
 import detectron2.data.transforms as T
 import random
@@ -7,10 +8,10 @@ import random
 from sklearn.model_selection import train_test_split
 from utils import rle_decode, mask_to_bbox, mask_to_polygons
 
-from detectron2.structures import BoxMode
+from detectron2.structures import BoxMode, Instances, Boxes
 from detectron2.config import get_cfg
 from detectron2.data import build_detection_train_loader, build_detection_test_loader, DatasetMapper, DatasetFromList, MapDataset
-from detectron2.data import get_detection_dataset_dicts
+from detectron2.data import get_detection_dataset_dicts, detection_utils 
 from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
 
 
@@ -45,7 +46,7 @@ class Dataset:
         # Split dataset into training and validation sets
         # statritify : same histograms of numbe of ships
         masks = masks[~masks['EncodedPixels'].isna()]
-        masks = masks[masks['EncodedPixels'].apply(lambda x: len(x.split(' ')) > 100)]
+        masks = masks[masks['EncodedPixels'].apply(lambda x: len(x.split(' ')) > 20)]
         unique_img_ids = masks[~masks['EncodedPixels'].isna()].groupby('ImageId').size().reset_index(name='counts')
         unique_img_ids = unique_img_ids[unique_img_ids['counts'] >= 1]
 
@@ -91,8 +92,6 @@ class Dataset:
                 obj["category_id"] = self.category_id
 
                 polygons = mask_to_polygons(mask)
-                if len(polygons[0]) < 6:
-                    continue
                 obj['segmentation'] = polygons
                 objs.append(obj)
             record['annotations'] = objs
@@ -215,6 +214,7 @@ class Dataset:
         return dataset_dicts
     
     def visdrone_dicts(self, img_paths):
+
         dataset_dicts = []
         ImageIds = []
         for img_path in img_paths:
@@ -265,3 +265,56 @@ class Dataset:
             dataset_dicts.append(record)
         
         return dataset_dicts
+
+    def yolo_data_loaders(self, cfg):
+        train_dataset_dicts = get_detection_dataset_dicts(['train_data'], filter_empty=True)
+        val_dataset_dicts = get_detection_dataset_dicts(['val_data'], filter_empty=True)
+
+        train_loader = build_detection_train_loader(
+            dataset=train_dataset_dicts,
+            mapper=self.yolo_mapper,
+            total_batch_size=cfg['batch_size']
+        )
+
+        
+        val_loader = build_detection_train_loader(
+            dataset=val_dataset_dicts,
+            mapper=self.yolo_mapper,
+            total_batch_size=cfg['batch_size']
+        )
+
+        return train_loader, val_loader
+
+    def yolo_mapper(self, dataset_dict):
+        dataset_dict = dataset_dict.copy()
+
+        # --- Load image ---
+        image = detection_utils.read_image(dataset_dict["file_name"], format="BGR")
+        h, w = image.shape[:2]
+
+        image = torch.as_tensor(image.copy().transpose(2, 0, 1), dtype=torch.float32) / 255.0
+
+        # --- Load annotations ---
+        boxes = []
+        classes = []
+
+        for anno in dataset_dict.get("annotations", []):
+            if anno.get("iscrowd", 0):
+                continue
+            boxes.append(anno["bbox"])         
+            classes.append(anno["category_id"])
+
+        boxes = torch.tensor(boxes, dtype=torch.float32)
+        classes = torch.tensor(classes, dtype=torch.int64)
+
+        instances = Instances((h, w))
+        instances.gt_boxes = Boxes(boxes)
+        instances.gt_classes = classes
+
+        # --- Required by Detectron2 ---
+        dataset_dict["image"] = image
+        dataset_dict["instances"] = instances
+        dataset_dict["height"] = h
+        dataset_dict["width"] = w
+
+        return dataset_dict

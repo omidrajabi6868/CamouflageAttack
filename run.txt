@@ -40,3 +40,9 @@ crun python Train.py \
     --model_path /home/oraja001/airbus_ship/AdversarialProject/trained_models/cascade_mask_rcnn_swin/model_final_246a82.pkl \
     --model_config /home/oraja001/airbus_ship/detectron2/projects/ViTDet/configs/COCO/cascade_mask_rcnn_swin_b_in21k_50ep.py \
     --transformer_based True
+
+Attack Reinforcement learning
+crun python TheMain.py --dataset_name airbus --attack_name shapeAware --batch_size 16 --optimizer Adam --learning_rate 1e-4 --output_dir /home/oraja001/airbus_ship/AdversarialProject/outputs/mask_rcnn_R_101_FPN_3x_one_class/ --model_path /home/oraja001/airbus_ship/AdversarialProject/trained_models/mask_rcnn_R_101_FPN_3x/model_final_ship.pth --model_config COCO-InstanceSegmentation/mask_rcnn_R_101_FPN_3x.yaml --attack_loss rl_optimization --save_name rl_optimization
+
+Yolo Training
+crun python -u Train.py --dataset_name airbus --num_classes 1 --batch_size 32 --learning_rate 1e-3 --output_dir /home/oraja001/airbus_ship/AdversarialProject/trained_models/yolo/ --model_path /home/oraja001/airbus_ship/AdversarialProject/trained_models/yolo/yolov8l.pt --model_config /home/oraja001/airbus_ship/AdversarialProject/yolo_configs/yolov8_l.yaml --transformer_based "False" --yolo_training "True"
