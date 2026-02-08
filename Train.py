@@ -231,7 +231,7 @@ def main(args):
     dataset = Dataset(dataset_name, category_id=args.category_id, random_id=args.random_id)
     train_df, valid_df = dataset.airbus_df()
 
-    DatasetCatalog.register('train_data', lambda: dataset.airbus_dicts(df=train_df[:], img_dir=img_dir))
+    DatasetCatalog.register('train_data', lambda: dataset.airbus_dicts(df=train_df[:5000], img_dir=img_dir))
     if args.multiclass:
         coco_classes = MetadataCatalog.get('coco_2017_train').thing_classes.copy()
         coco_classes[8] = 'ship'

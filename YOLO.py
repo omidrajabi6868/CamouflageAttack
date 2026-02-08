@@ -18,14 +18,15 @@ YOLOV8_SCALES = {
 def make_divisible(x, divisor=8):
     return int((x + divisor / 2) // divisor * divisor)
 
-def yolo_v8_postprocess(preds, strides=(8, 16, 32), conf_thres=0.25, iou_thres=0.7, max_det=300):
+def yolo_v8_postprocess(preds, strides=(8, 16, 32),
+                        conf_thres=0.25, iou_thres=0.7, max_det=300):
+
     device = preds[0].device
     bs = preds[0].shape[0]
-    nc = preds[0].shape[1] - 4 * 16
     reg_max = 16
+    nc = preds[0].shape[1] - 4 * reg_max
 
     outputs = []
-
     anchor_points, stride_tensor = make_anchors(preds, strides, device)
 
     for b in range(bs):
@@ -33,21 +34,25 @@ def yolo_v8_postprocess(preds, strides=(8, 16, 32), conf_thres=0.25, iou_thres=0
 
         for p in preds:
             p = p[b]
-            dist = p[:4 * reg_max].permute(1, 2, 0).reshape(-1, 4 * reg_max)
-            cls = p[4 * reg_max:].permute(1, 2, 0).reshape(-1, nc)
-            pred_dist.append(dist)
-            pred_cls.append(cls)
+            pred_dist.append(
+                p[:4 * reg_max].permute(1, 2, 0).reshape(-1, 4 * reg_max)
+            )
+            pred_cls.append(
+                p[4 * reg_max:].permute(1, 2, 0).reshape(-1, nc)
+            )
 
         pred_dist = torch.cat(pred_dist)
         pred_cls = torch.cat(pred_cls).sigmoid()
+
+        assert pred_dist.shape[0] == anchor_points.shape[0]
 
         boxes = decode_boxes(pred_dist, anchor_points, stride_tensor, reg_max)
 
         scores, labels = pred_cls.max(dim=1)
         mask = scores > conf_thres
 
-        boxes = boxes[mask]
-        scores = scores[mask]
+        boxes = boxes[mask].float()
+        scores = scores[mask].float()
         labels = labels[mask]
 
         if boxes.numel() == 0:
@@ -58,13 +63,11 @@ def yolo_v8_postprocess(preds, strides=(8, 16, 32), conf_thres=0.25, iou_thres=0
             boxes, scores, labels, iou_thres
         )[:max_det]
 
-        outputs.append(
-            torch.cat([
-                boxes[keep],
-                scores[keep, None],
-                labels[keep, None].float()
-            ], dim=1)
-        )
+        outputs.append(torch.cat([
+            boxes[keep],
+            scores[keep, None],
+            labels[keep, None].float()
+        ], dim=1))
 
     return outputs
 
@@ -475,7 +478,7 @@ class YOLOv8Loss(nn.Module):
                 )
 
             pred_dist = torch.cat(pred_dist)
-            pred_cls = torch.cat(pred_cls).sigmoid()
+            pred_cls = torch.cat(pred_cls)
 
             pred_boxes = decode_boxes(pred_dist, anchor_points, stride_tensor, self.reg_max)
 
@@ -490,8 +493,6 @@ class YOLOv8Loss(nn.Module):
             num_fg = fg_mask.sum().clamp(min=1)
 
             if fg_mask.sum() == 0:
-                cls_target = torch.zeros_like(pred_cls)
-                total_cls += self.bce(pred_cls, cls_target).mean()
                 continue
 
             total_box += (1 - bbox_ciou(
@@ -511,7 +512,10 @@ class YOLOv8Loss(nn.Module):
             cls_target = torch.zeros_like(pred_cls)
             cls_target[fg_mask, labels[fg_mask]] = scores[fg_mask]
 
-            total_cls += self.bce(pred_cls, cls_target).sum() / num_fg
+            cls_loss = self.bce(pred_cls, cls_target)
+            cls_loss = cls_loss.sum(dim=1)          # sum over classes
+            cls_loss = cls_loss[fg_mask].mean()     # only positives
+            total_cls += cls_loss
 
         return (
             self.box_weight * total_box +

@@ -1,3 +1,5 @@
 outputs/
 trained_models/
 __pycache__
+train.sh
+airbus.sh
