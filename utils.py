@@ -360,3 +360,60 @@ def iou_and_counts_detectron2(pred_boxes: Boxes,
     return dict(mean_iou=mean_iou,
                 detected=detected,
                 tp=tp, fp=fp, fn=fn)
+
+@torch.no_grad()
+def iou_and_counts_yolo(pred_instances,
+                   gt_instances,
+                   iou_thresh=0.5):
+
+    # Safe length check
+    num_pred = len(pred_instances.pred_boxes) if pred_instances.has("pred_boxes") else 0
+    num_gt = len(gt_instances.gt_boxes) if gt_instances.has("gt_boxes") else 0
+
+    if num_pred == 0 or num_gt == 0:
+        return dict(
+            mean_iou=0.0,
+            detected=0,
+            tp=0,
+            fp=num_pred,
+            fn=num_gt,
+        )
+
+    pred_boxes = pred_instances.pred_boxes
+    pred_scores = pred_instances.scores
+    gt_boxes = gt_instances.gt_boxes
+
+    device = pred_boxes.tensor.device
+
+    ious = pairwise_iou(pred_boxes, gt_boxes)
+
+    best_iou_per_gt, _ = ious.max(dim=0)
+    mean_iou = best_iou_per_gt.mean().item()
+    detected = (best_iou_per_gt > 0).sum().item()
+
+    _, order = pred_scores.sort(descending=True)
+    ious = ious[order]
+
+    matched_gt = torch.zeros(len(gt_boxes), dtype=torch.bool, device=device)
+
+    tp = 0
+    fp = 0
+
+    for row in ious:
+        max_iou, gt_idx = row.max(dim=0)
+
+        if max_iou >= iou_thresh and not matched_gt[gt_idx]:
+            tp += 1
+            matched_gt[gt_idx] = True
+        else:
+            fp += 1
+
+    fn = int((~matched_gt).sum())
+
+    return dict(
+        mean_iou=mean_iou,
+        detected=detected,
+        tp=tp,
+        fp=fp,
+        fn=fn,
+    )

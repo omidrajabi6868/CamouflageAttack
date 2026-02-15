@@ -245,8 +245,10 @@ class Poison:
     
     def scaleAdaptive_poisoning(self, image, patch, alpha, masks, training=True):
 
-        mask_one = torch.zeros((3, image.shape[1], image.shape[2])).to('cuda')
-        mask_zero = torch.ones((3, image.shape[1], image.shape[2])).to('cuda')
+        device = image.device
+
+        mask_one = torch.zeros((3, image.shape[1], image.shape[2])).to(device)
+        mask_zero = torch.ones((3, image.shape[1], image.shape[2])).to(device)
 
         if random.random() < self.prob:
             for mask in masks:
@@ -278,13 +280,16 @@ class Poison:
         return poisoned_image
     
     def shapeAware_poisoning(self, img, patch, shape, percentage, masks, training=True):
+        device = img.device
+        img = img.to(device)
+        patch = patch.to(device)
 
-        mask_one = torch.zeros((3, img.shape[1], img.shape[2])).to('cuda')
-        mask_zero = torch.ones((3, img.shape[1], img.shape[2])).to('cuda')
+        mask_one = torch.zeros((3, img.shape[1], img.shape[2])).to(device)
+        mask_zero = torch.ones((3, img.shape[1], img.shape[2])).to(device)
 
         if patch.shape[1] != img.shape[1] or patch.shape[2] != img.shape[2]:
             patch = F.interpolate(patch.unsqueeze(0), size=(img.shape[1], img.shape[2]),
-                            mode='bilinear', align_corners=False).squeeze(0)
+                            mode='bilinear', align_corners=False).squeeze(0).to(device)
 
         for mask in masks:
             lbl = label(mask)
@@ -385,7 +390,7 @@ class Poison:
                                         int(y0) - column_slice:int(y0) + column_slice]
                         mask_one[:, int(x0) - row_slice:  int(x0) + row_slice,
                         int(y0) - column_slice:int(y0) + column_slice] = patch[:, :mask_one_shape.shape[1],
-                                                                        :mask_one_shape.shape[2]].cpu()
+                                                                        :mask_one_shape.shape[2]]
                         mask_zero[:, int(x0) - row_slice:  int(x0) + row_slice,
                         int(y0) - column_slice:int(y0) + column_slice] = 0
                     elif shape in ['ellipse', 'disk']:
@@ -403,8 +408,10 @@ class Poison:
 
     def pieceWise_poisoning(self, img, patch, shape, percentage, masks, training=True):
 
-        mask_one = torch.zeros((3, img.shape[1], img.shape[2])).to('cuda')
-        mask_zero = torch.ones((3, img.shape[1], img.shape[2])).to('cuda')
+        device = img.device
+
+        mask_one = torch.zeros((3, img.shape[1], img.shape[2])).to(device)
+        mask_zero = torch.ones((3, img.shape[1], img.shape[2])).to(device)
 
         if patch.shape[1] != img.shape[1] or patch.shape[2] != img.shape[2]:
             patch = F.interpolate(patch.unsqueeze(0), size=(img.shape[1], img.shape[2]), mode='bilinear', align_corners=False).squeeze(0)

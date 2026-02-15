@@ -293,7 +293,6 @@ class DetectionNetwork:
         cfg = LazyConfig.load(model_config)
         cfg.dataloader.train.dataset.names = ("train_data",)
         cfg.dataloader.test.dataset.names = ("val_data",)
-        cfg.dataloader.test.num_workers = 0
 
         cfg.model.roi_heads.num_classes = self.num_classes
         cfg.train.output_dir = self.output_dir

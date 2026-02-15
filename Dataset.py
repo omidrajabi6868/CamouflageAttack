@@ -31,27 +31,29 @@ class CustomPoisonMapperCNN(DatasetMapper):
 
         binary_masks = []
         for polygon in polygons:
-            binary_mask = np.zeros((dataset_dict['image'].shape[1], dataset_dict['image'].shape[2]), dtype=np.uint8)
+            binary_mask = np.zeros((image.shape[1], image.shape[2]), dtype=np.uint8)
             polygon = polygon[0].reshape((-1, 1, 2))
             binary_mask = cv2.fillPoly(binary_mask, [np.array(polygon, dtype=np.int32)], 1)
             binary_masks.append(binary_mask)
         
+        self.mean = self.mean.to(image.device)
+        self.patch = self.patch.to(image.device)
         image = (image - self.mean[0])
         if self.poisoning_func in ['google', 'shapeShifter']:
-            adv_img = self.poison.google_poisoning(image.to('cuda'), patch=self.patch, percentage=self.percentage, masks=binary_masks, training=False)
+            adv_img = self.poison.google_poisoning(image, patch=self.patch, percentage=self.percentage, masks=binary_masks, training=False)
         elif self.poisoning_func == 'Dpatch':
-            adv_img = self.poison.dpatch_poisoning(image.to('cuda'), patch=self.patch, masks=binary_masks, training=False)
+            adv_img = self.poison.dpatch_poisoning(image, patch=self.patch, masks=binary_masks, training=False)
         elif self.poisoning_func == 'scaleAdaptive':
-            adv_img = self.poison.scaleAdaptive_poisoning(image.to('cuda'), patch=self.patch, alpha=self.percentage, masks=binary_masks, training=False)
+            adv_img = self.poison.scaleAdaptive_poisoning(image, patch=self.patch, alpha=self.percentage, masks=binary_masks, training=False)
         elif self.poisoning_func == 'shapeAware':
-            adv_img = self.poison.shapeAware_poisoning(image.to('cuda'), patch=self.patch, shape='ellipse', percentage=self.percentage, masks=binary_masks, training=False)
+            adv_img = self.poison.shapeAware_poisoning(image, patch=self.patch, shape='ellipse', percentage=self.percentage, masks=binary_masks, training=False)
         elif self.poisoning_func == 'pieceWise':
-            adv_img = self.poison.pieceWise_poisoning(image.to('cuda'), patch=self.patch, shape='ellipse', percentage=self.percentage, masks=binary_masks, training=False)
+            adv_img = self.poison.pieceWise_poisoning(image, patch=self.patch, shape='ellipse', percentage=self.percentage, masks=binary_masks, training=False)
         else:
-            adv_img = image.to('cuda')
-    
+            adv_img = image
 
-        adv_img = (adv_img + self.mean[0].to('cuda')).clamp(0, 255)
+        self.mean = self.mean.to(adv_img.device)
+        adv_img = (adv_img + self.mean[0]).clamp(0, 255)
         adv_img = torch.tensor(adv_img, dtype=torch.uint8)
     
         dataset_dict["image"] = adv_img
@@ -81,30 +83,34 @@ class CustomPoisonMapperTransformer:
 
         binary_masks = []
         for polygon in polygons:
-            binary_mask = np.zeros((dataset_dict['image'].shape[1], dataset_dict['image'].shape[2]), dtype=np.uint8)
+            binary_mask = np.zeros((image.shape[1], image.shape[2]), dtype=np.uint8)
             polygon = polygon[0].reshape((-1, 1, 2))
             binary_mask = cv2.fillPoly(binary_mask, [np.array(polygon, dtype=np.int32)], 1)
             binary_masks.append(binary_mask)
         
+        self.mean = self.mean.to(image.device)
+        self.patch = self.patch.to(image.device)
         image = (image - self.mean[0])
         if self.poisoning_func in ['google', 'shapeShifter']:
-            adv_img = self.poison.google_poisoning(image.to('cuda'), patch=self.patch, percentage=self.percentage, masks=binary_masks, training=False)
+            adv_img = self.poison.google_poisoning(image, patch=self.patch, percentage=self.percentage, masks=binary_masks, training=False)
         elif self.poisoning_func == 'Dpatch':
-            adv_img = self.poison.dpatch_poisoning(image.to('cuda'), patch=self.patch, masks=binary_masks, training=False)
+            adv_img = self.poison.dpatch_poisoning(image, patch=self.patch, masks=binary_masks, training=False)
         elif self.poisoning_func == 'scaleAdaptive':
-            adv_img = self.poison.scaleAdaptive_poisoning(image.to('cuda'), patch=self.patch, alpha=self.percentage, masks=binary_masks, training=False)
+            adv_img = self.poison.scaleAdaptive_poisoning(image, patch=self.patch, alpha=self.percentage, masks=binary_masks, training=False)
         elif self.poisoning_func == 'shapeAware':
-            adv_img = self.poison.shapeAware_poisoning(image.to('cuda'), patch=self.patch, shape='ellipse', percentage=self.percentage, masks=binary_masks, training=False)
+            adv_img = self.poison.shapeAware_poisoning(image, patch=self.patch, shape='ellipse', percentage=self.percentage, masks=binary_masks, training=False)
         elif self.poisoning_func == 'pieceWise':
-            adv_img = self.poison.pieceWise_poisoning(image.to('cuda'), patch=self.patch, shape='ellipse', percentage=self.percentage, masks=binary_masks, training=False)
+            adv_img = self.poison.pieceWise_poisoning(image, patch=self.patch, shape='ellipse', percentage=self.percentage, masks=binary_masks, training=False)
         else:
-            adv_img = image.to('cuda')
-    
+            adv_img = image
 
-        adv_img = (adv_img + self.mean[0].to('cuda')).clamp(0, 255)
+        self.mean = self.mean.to(adv_img.device)
+        adv_img = (adv_img + self.mean[0]).clamp(0, 255)
         adv_img = torch.tensor(adv_img, dtype=torch.uint8)
     
         dataset_dict["image"] = adv_img
+
+        return dataset_dict
 
 class Dataset:
     def __init__(self, name, category_id, random_id=False):
