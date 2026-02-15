@@ -9,7 +9,7 @@ import cv2
 
 from ultralytics import YOLO as ULYOLO
 from ultralytics.nn.modules.conv import Conv as ULConv
-from detectron2.structures import Boxes, Instances
+from detectron2.structures import Boxes, Instances, pairwise_iou
 
 def rle_decode(mask_rle, shape=(768, 768)):
 

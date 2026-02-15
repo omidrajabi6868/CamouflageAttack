@@ -7,13 +7,104 @@ import random
 
 from sklearn.model_selection import train_test_split
 from utils import rle_decode, mask_to_bbox, mask_to_polygons
+from Poison import Poison
 
 from detectron2.structures import BoxMode, Instances, Boxes
-from detectron2.config import get_cfg
+from detectron2.config import get_cfg, instantiate
 from detectron2.data import build_detection_train_loader, build_detection_test_loader, DatasetMapper, DatasetFromList, MapDataset
 from detectron2.data import get_detection_dataset_dicts, detection_utils 
 from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
 
+class CustomPoisonMapperCNN(DatasetMapper):
+    def __init__(self, cfg, is_train=True, patch=None, percentage=0.6, poisoning_func=None):
+        self.percentage = percentage
+        self.poisoning_func = poisoning_func
+        self.poison = Poison(prob=1.0)
+        self.patch = patch
+        self.mean = torch.tensor(cfg.MODEL.PIXEL_MEAN).view(1, 3, 1, 1)
+        super().__init__(cfg, is_train, augmentations=[])
+
+    def __call__(self, dataset_dict):
+        dataset_dict = super().__call__(dataset_dict)
+        image = dataset_dict["image"]
+        polygons = dataset_dict['instances'].gt_masks
+
+        binary_masks = []
+        for polygon in polygons:
+            binary_mask = np.zeros((dataset_dict['image'].shape[1], dataset_dict['image'].shape[2]), dtype=np.uint8)
+            polygon = polygon[0].reshape((-1, 1, 2))
+            binary_mask = cv2.fillPoly(binary_mask, [np.array(polygon, dtype=np.int32)], 1)
+            binary_masks.append(binary_mask)
+        
+        image = (image - self.mean[0])
+        if self.poisoning_func in ['google', 'shapeShifter']:
+            adv_img = self.poison.google_poisoning(image.to('cuda'), patch=self.patch, percentage=self.percentage, masks=binary_masks, training=False)
+        elif self.poisoning_func == 'Dpatch':
+            adv_img = self.poison.dpatch_poisoning(image.to('cuda'), patch=self.patch, masks=binary_masks, training=False)
+        elif self.poisoning_func == 'scaleAdaptive':
+            adv_img = self.poison.scaleAdaptive_poisoning(image.to('cuda'), patch=self.patch, alpha=self.percentage, masks=binary_masks, training=False)
+        elif self.poisoning_func == 'shapeAware':
+            adv_img = self.poison.shapeAware_poisoning(image.to('cuda'), patch=self.patch, shape='ellipse', percentage=self.percentage, masks=binary_masks, training=False)
+        elif self.poisoning_func == 'pieceWise':
+            adv_img = self.poison.pieceWise_poisoning(image.to('cuda'), patch=self.patch, shape='ellipse', percentage=self.percentage, masks=binary_masks, training=False)
+        else:
+            adv_img = image.to('cuda')
+    
+
+        adv_img = (adv_img + self.mean[0].to('cuda')).clamp(0, 255)
+        adv_img = torch.tensor(adv_img, dtype=torch.uint8)
+    
+        dataset_dict["image"] = adv_img
+
+        return dataset_dict
+
+class CustomPoisonMapperTransformer:
+    def __init__(self, cfg, is_train=True, patch=None, percentage=0.6, poisoning_func=None):
+        self.percentage = percentage
+        self.poisoning_func = poisoning_func
+        self.poison = Poison(prob=1.0)
+        self.patch = patch
+        self.aug = []
+        self.cfg = cfg
+        self.cfg.dataloader.test.mapper.is_train = is_train  # force annotation loading
+        self.cfg.dataloader.test.mapper.use_instance_mask = is_train
+        self.cfg.dataloader.test.mapper.recompute_boxes = is_train  # useful for masks->boxes
+        self.cfg.dataloader.test.num_workers = 0
+        val_loader = instantiate(self.cfg.dataloader.test)
+        self.default_mapper = val_loader.dataset._map_func  # the default DatasetMapper
+        self.mean = torch.tensor(cfg.model.pixel_mean).view(1, 3, 1, 1)
+
+    def __call__(self, dataset_dict):
+        dataset_dict = self.default_mapper(dataset_dict)
+        image = dataset_dict["image"]
+        polygons = dataset_dict['instances'].gt_masks
+
+        binary_masks = []
+        for polygon in polygons:
+            binary_mask = np.zeros((dataset_dict['image'].shape[1], dataset_dict['image'].shape[2]), dtype=np.uint8)
+            polygon = polygon[0].reshape((-1, 1, 2))
+            binary_mask = cv2.fillPoly(binary_mask, [np.array(polygon, dtype=np.int32)], 1)
+            binary_masks.append(binary_mask)
+        
+        image = (image - self.mean[0])
+        if self.poisoning_func in ['google', 'shapeShifter']:
+            adv_img = self.poison.google_poisoning(image.to('cuda'), patch=self.patch, percentage=self.percentage, masks=binary_masks, training=False)
+        elif self.poisoning_func == 'Dpatch':
+            adv_img = self.poison.dpatch_poisoning(image.to('cuda'), patch=self.patch, masks=binary_masks, training=False)
+        elif self.poisoning_func == 'scaleAdaptive':
+            adv_img = self.poison.scaleAdaptive_poisoning(image.to('cuda'), patch=self.patch, alpha=self.percentage, masks=binary_masks, training=False)
+        elif self.poisoning_func == 'shapeAware':
+            adv_img = self.poison.shapeAware_poisoning(image.to('cuda'), patch=self.patch, shape='ellipse', percentage=self.percentage, masks=binary_masks, training=False)
+        elif self.poisoning_func == 'pieceWise':
+            adv_img = self.poison.pieceWise_poisoning(image.to('cuda'), patch=self.patch, shape='ellipse', percentage=self.percentage, masks=binary_masks, training=False)
+        else:
+            adv_img = image.to('cuda')
+    
+
+        adv_img = (adv_img + self.mean[0].to('cuda')).clamp(0, 255)
+        adv_img = torch.tensor(adv_img, dtype=torch.uint8)
+    
+        dataset_dict["image"] = adv_img
 
 class Dataset:
     def __init__(self, name, category_id, random_id=False):
