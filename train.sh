@@ -2,8 +2,8 @@
 #SBATCH --job-name=yolo_training
 #SBATCH --error=outputs/yolo_training.txt
 #SBATCH --output=outputs/yolo_training.txt
-#SBATCH --ntasks=4
-#SBATCH --cpus-per-task=4
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
 #SBATCH --partition=high-gpu-mem
 #SBATCH --gres=gpu:1
 #SBATCH --time=6-12:00:00  

@@ -147,9 +147,19 @@ def box2dist(anchor_points, gt_boxes, stride, reg_max):
     stride: [N,1] or scalar
     returns: [N,4] distances in feature-map units
     """
+    device = gt_boxes.device
+
+    if not torch.is_tensor(stride):
+        stride = torch.tensor(stride, device=device)
+
+    if stride.ndim == 1:
+        stride = stride.unsqueeze(1)
+
+    # convert GT boxes to feature-map space
     x1y1 = gt_boxes[:, :2] / stride
     x2y2 = gt_boxes[:, 2:] / stride
 
+    # L, T, R, B distances
     dist = torch.cat(
         (
             anchor_points - x1y1,
@@ -158,30 +168,66 @@ def box2dist(anchor_points, gt_boxes, stride, reg_max):
         dim=1
     )
 
-    return dist.clamp(0, reg_max - 1e-4)
+    eps = 1e-6
+    return dist.clamp(min=0.0, max=reg_max - eps)
     
 def bbox_ciou(pred, target, eps=1e-7):
     """
-    pred:   [...,4]
-    target: [...,4]
+    pred, target: [..., 4] in (x1, y1, x2, y2), image space
+    returns: CIoU in [-1, 1]
     """
     px1, py1, px2, py2 = pred[..., 0], pred[..., 1], pred[..., 2], pred[..., 3]
     tx1, ty1, tx2, ty2 = target[..., 0], target[..., 1], target[..., 2], target[..., 3]
 
-    xi1 = torch.max(px1, tx1)
-    yi1 = torch.max(py1, ty1)
-    xi2 = torch.min(px2, tx2)
-    yi2 = torch.min(py2, ty2)
+    # widths & heights
+    pw = (px2 - px1).clamp(min=eps)
+    ph = (py2 - py1).clamp(min=eps)
+    tw = (tx2 - tx1).clamp(min=eps)
+    th = (ty2 - ty1).clamp(min=eps)
 
-    inter = (xi2 - xi1).clamp(0) * (yi2 - yi1).clamp(0)
+    # centers
+    pcx = (px1 + px2) * 0.5
+    pcy = (py1 + py2) * 0.5
+    tcx = (tx1 + tx2) * 0.5
+    tcy = (ty1 + ty2) * 0.5
 
-    area_p = (px2 - px1).clamp(0) * (py2 - py1).clamp(0)
-    area_t = (tx2 - tx1).clamp(0) * (ty2 - ty1).clamp(0)
+    # intersection
+    ix1 = torch.max(px1, tx1)
+    iy1 = torch.max(py1, ty1)
+    ix2 = torch.min(px2, tx2)
+    iy2 = torch.min(py2, ty2)
 
+    inter = (ix2 - ix1).clamp(min=0) * (iy2 - iy1).clamp(min=0)
+
+    area_p = pw * ph
+    area_t = tw * th
     union = area_p + area_t - inter + eps
+
     iou = inter / union
 
-    return iou
+    # enclosing box
+    ex1 = torch.min(px1, tx1)
+    ey1 = torch.min(py1, ty1)
+    ex2 = torch.max(px2, tx2)
+    ey2 = torch.max(py2, ty2)
+
+    cw = (ex2 - ex1).clamp(min=eps)
+    ch = (ey2 - ey1).clamp(min=eps)
+
+    # center distance
+    rho2 = (pcx - tcx) ** 2 + (pcy - tcy) ** 2
+    c2 = cw ** 2 + ch ** 2 + eps
+
+    # aspect ratio penalty
+    v = (4 / (torch.pi ** 2)) * (
+        torch.atan(tw / th) - torch.atan(pw / ph)
+    ) ** 2
+
+    with torch.no_grad():
+        alpha = v / (1 - iou + v + eps)
+
+    ciou = iou - (rho2 / c2) - alpha * v
+    return ciou
 
 def yolo_to_instances(boxes, scores, classes, image_shape):
     """
@@ -205,18 +251,36 @@ def make_grid(H, W, device):
     return torch.stack((x, y), dim=-1).view(-1, 2).float()
 
 def make_anchors(feats, strides, device):
-    anchor_points, stride_tensor = [], []
+    anchor_points = []
+    stride_tensor = []
+
     for feat, stride in zip(feats, strides):
         _, _, h, w = feat.shape
+
         sy, sx = torch.meshgrid(
             torch.arange(h, device=device),
             torch.arange(w, device=device),
             indexing="ij"
         )
-        points = torch.stack((sx, sy), dim=-1).view(-1, 2)
+
+        points = torch.stack(
+            (sx + 0.5, sy + 0.5), dim=-1
+        ).reshape(-1, 2).float()
+
         anchor_points.append(points)
-        stride_tensor.append(torch.full((points.shape[0], 1), stride, device=device))
-    return torch.cat(anchor_points), torch.cat(stride_tensor)
+
+        stride_tensor.append(
+            torch.full(
+                (points.shape[0], 1),
+                float(stride),
+                device=device
+            )
+        )
+
+    return (
+        torch.cat(anchor_points, dim=0),
+        torch.cat(stride_tensor, dim=0),
+    )
 
 def decode_boxes(pred_dist, anchor_points, stride_tensor, reg_max):
     """
@@ -242,3 +306,57 @@ def decode_boxes(pred_dist, anchor_points, stride_tensor, reg_max):
         stride_tensor = stride_tensor.unsqueeze(1)
 
     return boxes * stride_tensor
+
+@torch.no_grad()
+def iou_and_counts_detectron2(pred_boxes: Boxes,
+                   pred_scores: torch.Tensor,
+                   gt_boxes: Boxes,
+                   iou_thresh: float = 0.50):
+    """
+    Return mean IoU & detected (recall proxy) **plus** TP / FP / FN
+    calculated with greedy one-to-one matching at `iou_thresh`.
+
+    Args
+    ----
+    pred_boxes   : detectron2.structures.Boxes  (N, 4)
+    pred_scores  : 1-D tensor (N,)  confidence per prediction
+    gt_boxes     : Boxes  (M, 4)
+    iou_thresh   : float  IoU threshold for TP/FP
+
+    Returns
+    -------
+    dict { mean_iou, detected, tp, fp, fn }
+    """
+    device = pred_boxes.tensor.device
+    if len(pred_boxes) == 0 or len(gt_boxes) == 0:
+        mean_iou   = 0.0
+        detected   = 0
+        tp, fp, fn = 0, len(pred_boxes), len(gt_boxes)
+        return dict(mean_iou=mean_iou, detected=detected,
+                    tp=tp, fp=fp, fn=fn)
+
+    ious = pairwise_iou(pred_boxes, gt_boxes)
+
+    best_iou_per_gt, _ = ious.max(dim=0)         
+    mean_iou = best_iou_per_gt.mean().item()
+    detected = (best_iou_per_gt > 0).sum().item()
+
+    _, order = pred_scores.sort(descending=True)
+    ious = ious[order]
+
+    matched_gt = torch.zeros(len(gt_boxes), dtype=torch.bool, device=device)
+    tp = fp = 0
+
+    for row in ious:
+        max_iou, gt_idx = row.max(dim=0)
+        if max_iou >= iou_thresh and not matched_gt[gt_idx]:
+            tp += 1
+            matched_gt[gt_idx] = True
+        else:
+            fp += 1
+
+    fn = int((~matched_gt).sum())
+
+    return dict(mean_iou=mean_iou,
+                detected=detected,
+                tp=tp, fp=fp, fn=fn)

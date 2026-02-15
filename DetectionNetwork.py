@@ -315,6 +315,11 @@ class DetectionNetwork:
     def yolo_model_net(self, model_config, train_data_len, pretrained="/home/oraja001/airbus_ship/AdversarialProject/trained_models/yolo/yolov8l.pt"):
 
         cfg = load_yaml(model_config)
+        cfg['OUTPUT_DIR'] = self.output_dir
+        cfg['batch_size'] = self.batch_size
+        cfg['epoch_num'] = self.epoch_num
+        cfg['learning_rate'] = self.learning_rate
+        cfg['model']['num_classes'] = self.num_classes
 
         model = YOLO(
             model_size=cfg["model"]["size"],
@@ -324,5 +329,8 @@ class DetectionNetwork:
 
         if pretrained:
             model = load_pretrained_yolo(model, pretrained)
+
+        if self.model_path:
+            model.load_state_dict(torch.load(self.model_path))
 
         return model, cfg

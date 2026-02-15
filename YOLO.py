@@ -52,7 +52,7 @@ def yolo_v8_postprocess(preds, strides=(8, 16, 32),
         mask = scores > conf_thres
 
         boxes = boxes[mask].float()
-        scores = scores[mask].float()
+        scores = scores[mask]
         labels = labels[mask]
 
         if boxes.numel() == 0:
@@ -373,66 +373,77 @@ class TaskAlignedAssigner:
         self.beta = beta
 
     @torch.no_grad()
-    def assign(self, pred_boxes, pred_scores, gt_boxes, gt_labels, anchor_points):
-        """
-        pred_boxes: [N,4] xyxy
-        pred_scores: [N,nc] sigmoid scores
-        gt_boxes: [M,4]
-        gt_labels: [M]
-        anchor_points: [N,2]
-        """
-        N, M = pred_boxes.shape[0], gt_boxes.shape[0]
+    def assign(self, pred_boxes, pred_scores, gt_boxes, gt_labels, anchor_points, stride_tensor):
+        device = pred_boxes.device
+        N = pred_boxes.shape[0]
+        M = gt_boxes.shape[0]
+
+        if stride_tensor.ndim == 1:
+            stride_tensor = stride_tensor.unsqueeze(1)
+
+        anchor_points_img = anchor_points * stride_tensor
 
         if M == 0:
             return (
-                torch.zeros(N, dtype=torch.bool, device=pred_boxes.device),
-                torch.zeros(N, dtype=torch.long, device=pred_boxes.device),
-                torch.zeros(N, 4, device=pred_boxes.device),
-                torch.zeros(N, device=pred_boxes.device)
+                torch.zeros(N, dtype=torch.bool, device=device),
+                torch.zeros(N, dtype=torch.long, device=device),
+                torch.zeros(N, 4, device=device),
+                torch.zeros(N, device=device),
             )
 
-        # center-in-gt constraint
         in_gt = (
-            (anchor_points[:, None, 0] >= gt_boxes[None, :, 0]) &
-            (anchor_points[:, None, 0] <= gt_boxes[None, :, 2]) &
-            (anchor_points[:, None, 1] >= gt_boxes[None, :, 1]) &
-            (anchor_points[:, None, 1] <= gt_boxes[None, :, 3])
-        )
+            (anchor_points_img[:, None, 0] >= gt_boxes[None, :, 0]) &
+            (anchor_points_img[:, None, 0] <= gt_boxes[None, :, 2]) &
+            (anchor_points_img[:, None, 1] >= gt_boxes[None, :, 1]) &
+            (anchor_points_img[:, None, 1] <= gt_boxes[None, :, 3])
+        ) 
 
         ious = bbox_ciou(
             pred_boxes[:, None, :],
             gt_boxes[None, :, :]
-        )  # [N, M]
+        ) 
+        assert gt_labels.max() < pred_scores.shape[1]
+        cls_scores = pred_scores[:, gt_labels.long()]  # [N, M]
 
-        cls_scores = pred_scores[:, gt_labels]  # [N,M]
-
+        ious = ious.clamp(min=0)
         alignment = (cls_scores ** self.alpha) * (ious ** self.beta)
         alignment = alignment * in_gt
 
         eps = 1e-9
         alignment = alignment / (alignment.max(dim=0, keepdim=True).values + eps)
+        alignment = alignment * (ious > 0.1)
 
-        fg_mask = torch.zeros(N, dtype=torch.bool, device=pred_boxes.device)
-        assigned_gt = torch.full((N,), -1, device=pred_boxes.device)
-        assigned_score = torch.zeros(N, device=pred_boxes.device)
+        fg_mask = torch.zeros(N, dtype=torch.bool, device=device)
+        assigned_gt = torch.full((N,), -1, device=device)
+        assigned_score = torch.zeros(N, device=device)
 
         topk = min(self.topk, N)
 
         for gt_idx in range(M):
             scores = alignment[:, gt_idx]
-            _, idx = scores.topk(topk)
+            topk_scores, idx = scores.topk(topk)
+
+            valid = topk_scores > 0
+            idx = idx[valid]
+
             better = scores[idx] > assigned_score[idx]
+            idx = idx[better]
 
-            fg_mask[idx[better]] = True
-            assigned_gt[idx[better]] = gt_idx
-            assigned_score[idx[better]] = scores[idx[better]]
+            fg_mask[idx] = True
+            assigned_gt[idx] = gt_idx
+            assigned_score[idx] = scores[idx]
 
-        return (
-            fg_mask,
-            gt_labels[assigned_gt],
-            gt_boxes[assigned_gt],
-            assigned_score
-        )
+        # ---------------------------
+        # Safe label & box gathering
+        # ---------------------------
+        labels = torch.zeros(N, dtype=torch.long, device=device)
+        boxes = torch.zeros(N, 4, device=device)
+
+        pos = assigned_gt >= 0
+        labels[pos] = gt_labels[assigned_gt[pos]]
+        boxes[pos] = gt_boxes[assigned_gt[pos]]
+
+        return fg_mask, labels, boxes, assigned_score
 
 
 # -----------------------------
@@ -487,18 +498,22 @@ class YOLOv8Loss(nn.Module):
                 pred_cls.sigmoid(),
                 gt_boxes,
                 gt_labels,
-                anchor_points * stride_tensor
-            )
+                anchor_points,
+                stride_tensor
+                )
 
             num_fg = fg_mask.sum().clamp(min=1)
 
             if fg_mask.sum() == 0:
+                total_box += pred_boxes.sum() * 0.0
+                total_cls += pred_cls.sum() * 0.0
+                total_dfl += pred_dist.sum() * 0.0
                 continue
 
             total_box += (1 - bbox_ciou(
                 pred_boxes[fg_mask],
                 boxes[fg_mask]
-            )).mean() / num_fg
+            )).mean()
 
             dist_targets = box2dist(
                 anchor_points[fg_mask],
@@ -507,14 +522,14 @@ class YOLOv8Loss(nn.Module):
                 self.reg_max
             )
 
-            total_dfl += self.dfl(pred_dist[fg_mask], dist_targets) / num_fg
+            total_dfl += self.dfl(pred_dist[fg_mask], dist_targets)
 
             cls_target = torch.zeros_like(pred_cls)
             cls_target[fg_mask, labels[fg_mask]] = scores[fg_mask]
 
             cls_loss = self.bce(pred_cls, cls_target)
             cls_loss = cls_loss.sum(dim=1)          # sum over classes
-            cls_loss = cls_loss[fg_mask].mean()     # only positives
+            cls_loss = cls_loss.mean()     # only positives
             total_cls += cls_loss
 
         return (

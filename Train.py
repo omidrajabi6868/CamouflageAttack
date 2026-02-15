@@ -174,7 +174,7 @@ class Train:
                     "labels": inst.gt_classes.to(device)
                 })
 
-            preds = model(images)
+            preds = model(images/255.0)
             loss = yolo_loss(preds, targets, strides=[8, 16, 32])
 
             optimizer.zero_grad(set_to_none=True)
@@ -215,7 +215,7 @@ class Train:
                     "labels": inst.gt_classes.to(device)
                 })
 
-            preds = model(images)
+            preds = model(images/255.0)
             loss = yolo_loss(preds, targets, strides=[8, 16, 32])
             losses.append(loss.item())
 
@@ -231,7 +231,7 @@ def main(args):
     dataset = Dataset(dataset_name, category_id=args.category_id, random_id=args.random_id)
     train_df, valid_df = dataset.airbus_df()
 
-    DatasetCatalog.register('train_data', lambda: dataset.airbus_dicts(df=train_df[:5000], img_dir=img_dir))
+    DatasetCatalog.register('train_data', lambda: dataset.airbus_dicts(df=train_df[:], img_dir=img_dir))
     if args.multiclass:
         coco_classes = MetadataCatalog.get('coco_2017_train').thing_classes.copy()
         coco_classes[8] = 'ship'
@@ -262,10 +262,6 @@ def main(args):
     if args.yolo_training:
         model, cfg = network.yolo_model_net(model_config=args.model_config,
                                             train_data_len=train_data_len)
-        cfg['batch_size'] = args.batch_size
-        cfg['epoch_num'] = args.epoch_num
-        cfg['learning_rate'] = args.learning_rate
-        cfg['model']['num_classes'] = args.num_classes
         cfg['train_data_len'] = train_data_len
         cfg['val_data_len'] = val_data_len
         Train(cfg).yolo_model_training(model, dataset)
@@ -286,7 +282,7 @@ if __name__ == '__main__':
     parser.add_argument("--dataset_name", type=str, default="airbus")
     parser.add_argument("--img_dir", type=str, default="/home/oraja001/airbus_ship/airbus/train_v2")
     parser.add_argument("--multiclass", type=bool, default=False)
-    parser.add_argument("--epoch_num", type=int, default=200)
+    parser.add_argument("--epoch_num", type=int, default=100)
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--learning_rate", type=float, default=1e-3)
     parser.add_argument("--category_id", type=int, default=0)

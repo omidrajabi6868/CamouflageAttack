@@ -266,22 +266,22 @@ class Dataset:
         
         return dataset_dicts
 
-    def yolo_data_loaders(self, cfg):
-        train_dataset_dicts = get_detection_dataset_dicts(['train_data'], filter_empty=True)
-        val_dataset_dicts = get_detection_dataset_dicts(['val_data'], filter_empty=True)
+    def yolo_data_loaders(self, cfg, split='both'):
+        train_loader = None
+        val_loader = None
+        if split == 'both'or split == 'train':
+            train_dataset_dicts = get_detection_dataset_dicts(['train_data'], filter_empty=True)
+            train_loader = build_detection_train_loader(
+                dataset=train_dataset_dicts,
+                mapper=self.yolo_mapper,
+                total_batch_size=cfg['batch_size'])
 
-        train_loader = build_detection_train_loader(
-            dataset=train_dataset_dicts,
-            mapper=self.yolo_mapper,
-            total_batch_size=cfg['batch_size']
-        )
-
-        
-        val_loader = build_detection_train_loader(
-            dataset=val_dataset_dicts,
-            mapper=self.yolo_mapper,
-            total_batch_size=cfg['batch_size']
-        )
+        if split == 'both' or split == 'val':
+            val_dataset_dicts = get_detection_dataset_dicts(['val_data'], filter_empty=True)
+            val_loader = build_detection_train_loader(
+                dataset=val_dataset_dicts,
+                mapper=self.yolo_mapper,
+                total_batch_size=cfg['batch_size'])
 
         return train_loader, val_loader
 
@@ -292,7 +292,7 @@ class Dataset:
         image = detection_utils.read_image(dataset_dict["file_name"], format="BGR")
         h, w = image.shape[:2]
 
-        image = torch.as_tensor(image.copy().transpose(2, 0, 1), dtype=torch.float32) / 255.0
+        image = torch.as_tensor(image.copy().transpose(2, 0, 1), dtype=torch.float32)
 
         # --- Load annotations ---
         boxes = []
