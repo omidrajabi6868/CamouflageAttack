@@ -308,6 +308,60 @@ def decode_boxes(pred_dist, anchor_points, stride_tensor, reg_max):
     return boxes * stride_tensor
 
 @torch.no_grad()
+def _greedy_tp_fp_fn_from_iou(
+    ious: torch.Tensor,
+    pred_scores: torch.Tensor,
+    num_gt: int,
+    iou_thresh: float,
+):
+    """
+    Fast, vectorized greedy matching for TP/FP/FN.
+
+    Matching policy matches the existing implementation:
+      1) sort predictions by score (descending)
+      2) each prediction takes its best-IoU GT
+      3) TP if IoU >= threshold and GT is unmatched, else FP
+    """
+    num_pred = ious.shape[0]
+
+    if num_pred == 0 or num_gt == 0:
+        return 0, num_pred, num_gt
+
+    order = pred_scores.argsort(descending=True)
+    ordered_ious = ious[order]
+
+    max_iou_per_pred, best_gt_per_pred = ordered_ious.max(dim=1)
+    valid = max_iou_per_pred >= iou_thresh
+
+    if not valid.any():
+        return 0, num_pred, num_gt
+
+    matched_gt_candidates = best_gt_per_pred[valid]
+    candidate_positions = torch.arange(
+        matched_gt_candidates.numel(), device=ious.device, dtype=torch.long
+    )
+
+    # Keep only the first (highest-score) prediction per GT.
+    first_pos_per_gt = torch.full(
+        (num_gt,),
+        matched_gt_candidates.numel(),
+        device=ious.device,
+        dtype=torch.long,
+    )
+    first_pos_per_gt.scatter_reduce_(
+        0,
+        matched_gt_candidates,
+        candidate_positions,
+        reduce="amin",
+        include_self=True,
+    )
+
+    tp = int((first_pos_per_gt < matched_gt_candidates.numel()).sum().item())
+    fp = num_pred - tp
+    fn = num_gt - tp
+    return tp, fp, fn
+
+@torch.no_grad()
 def iou_and_counts_detectron2(pred_boxes: Boxes,
                    pred_scores: torch.Tensor,
                    gt_boxes: Boxes,
@@ -327,7 +381,6 @@ def iou_and_counts_detectron2(pred_boxes: Boxes,
     -------
     dict { mean_iou, detected, tp, fp, fn }
     """
-    device = pred_boxes.tensor.device
     if len(pred_boxes) == 0 or len(gt_boxes) == 0:
         mean_iou   = 0.0
         detected   = 0
@@ -341,21 +394,13 @@ def iou_and_counts_detectron2(pred_boxes: Boxes,
     mean_iou = best_iou_per_gt.mean().item()
     detected = (best_iou_per_gt > 0).sum().item()
 
-    _, order = pred_scores.sort(descending=True)
-    ious = ious[order]
+    tp, fp, fn = _greedy_tp_fp_fn_from_iou(
+        ious=ious,
+        pred_scores=pred_scores,
+        num_gt=len(gt_boxes),
+        iou_thresh=iou_thresh,
+    )
 
-    matched_gt = torch.zeros(len(gt_boxes), dtype=torch.bool, device=device)
-    tp = fp = 0
-
-    for row in ious:
-        max_iou, gt_idx = row.max(dim=0)
-        if max_iou >= iou_thresh and not matched_gt[gt_idx]:
-            tp += 1
-            matched_gt[gt_idx] = True
-        else:
-            fp += 1
-
-    fn = int((~matched_gt).sum())
 
     return dict(mean_iou=mean_iou,
                 detected=detected,
@@ -383,32 +428,18 @@ def iou_and_counts_yolo(pred_instances,
     pred_scores = pred_instances.scores
     gt_boxes = gt_instances.gt_boxes
 
-    device = pred_boxes.tensor.device
-
     ious = pairwise_iou(pred_boxes, gt_boxes)
 
     best_iou_per_gt, _ = ious.max(dim=0)
     mean_iou = best_iou_per_gt.mean().item()
     detected = (best_iou_per_gt > 0).sum().item()
 
-    _, order = pred_scores.sort(descending=True)
-    ious = ious[order]
-
-    matched_gt = torch.zeros(len(gt_boxes), dtype=torch.bool, device=device)
-
-    tp = 0
-    fp = 0
-
-    for row in ious:
-        max_iou, gt_idx = row.max(dim=0)
-
-        if max_iou >= iou_thresh and not matched_gt[gt_idx]:
-            tp += 1
-            matched_gt[gt_idx] = True
-        else:
-            fp += 1
-
-    fn = int((~matched_gt).sum())
+    tp, fp, fn = _greedy_tp_fp_fn_from_iou(
+        ious=ious,
+        pred_scores=pred_scores,
+        num_gt=len(gt_boxes),
+        iou_thresh=iou_thresh,
+    )
 
     return dict(
         mean_iou=mean_iou,
