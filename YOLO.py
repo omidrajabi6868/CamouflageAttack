@@ -92,21 +92,16 @@ class YOLOPredictor:
         self.device = device
 
     @torch.no_grad()
-    def __call__(self, image_bgr):
-        h, w = image_bgr.shape[:2]
-
+    def predict_batch(self, image_bgr_list):
+        if len(image_bgr_list) == 0:
+            return []
         # --- preprocess (YOLOv8 style) ---
-        image = (
-            torch.from_numpy(image_bgr)
-            .to(self.device)
-            .float()
-            .permute(2, 0, 1)
-            .unsqueeze(0)
-            / 255.0
-        )
+        image_shapes = [img.shape[:2] for img in image_bgr_list]
+        images = [torch.from_numpy(img).to(self.device).float().permute(2, 0, 1)/ 255.0 for img in image_bgr_list]
+        batch = torch.stack(images, dim=0)
 
         # --- forward ---
-        preds = self.model(image)
+        preds = self.model(batch)
 
         # --- YOLOv8 postprocess ---
         dets = yolo_v8_postprocess(
@@ -116,20 +111,66 @@ class YOLOPredictor:
             iou_thres=self.iou_thres,
         )
 
-        if dets[0].numel() == 0:
-            return {"instances": Instances((h, w))}
+        outputs = []
+        for det, (h, w) in zip(dets, image_shapes):
+            if det.numel() == 0:
+                outputs.append({"instances": Instances((h, w))})
+                continue
 
-        det = dets[0]
+            boxes = det[:, :4]
+            scores = det[:, 4]
+            classes = det[:, 5].long()
+            instances = yolo_to_instances(boxes, scores, classes, (h, w))
+            outputs.append({"instances": instances})
 
-        boxes = det[:, :4]
-        scores = det[:, 4]
-        classes = det[:, 5].long()
+        return outputs
 
-        instances = yolo_to_instances(
-            boxes, scores, classes, (h, w)
+    @torch.no_grad()
+    def predict_batch_tensor(self, images_chw: torch.Tensor):
+        """
+        images_chw: [B, C, H, W] torch tensor on CPU/GPU.
+        Accepts uint8/[0,255] or float tensors.
+        """
+        if images_chw.numel() == 0:
+            return []
+
+        if images_chw.dim() != 4:
+            raise ValueError(f"Expected [B,C,H,W], got shape={tuple(images_chw.shape)}")
+
+        batch = images_chw.to(self.device)
+        if not torch.is_floating_point(batch):
+            batch = batch.float()
+        if batch.max() > 1.0:
+            batch = batch / 255.0
+        
+        _, _, h, w = batch.shape
+
+        preds = self.model(batch)
+        dets = yolo_v8_postprocess(
+            preds,
+            strides=self.strides,
+            conf_thres=self.conf_thres,
+            iou_thres=self.iou_thres,
         )
 
-        return {"instances": instances}
+        outputs = []
+        for det in dets:
+            if det.numel() == 0:
+                outputs.append({"instances": Instances((h, w))})
+                continue
+
+            boxes = det[:, :4]
+            scores = det[:, 4]
+            classes = det[:, 5].long()
+            instances = yolo_to_instances(boxes, scores, classes, (h, w))
+            outputs.append({"instances": instances})
+
+        return outputs
+
+    @torch.no_grad()
+    def __call__(self, image_bgr):
+        return self.predict_batch([image_bgr])[0]
+
 # ---------------------------
 # Basic Convolution Layer
 # ---------------------------
