@@ -112,6 +112,95 @@ class CustomPoisonMapperTransformer:
 
         return dataset_dict
 
+class CustomPoisonMapperYOLO:
+    def __init__(self, cfg=None, is_train=True, patch=None, percentage=0.6, poisoning_func=None):
+        self.percentage = percentage
+        self.poisoning_func = poisoning_func
+        self.poison = Poison(prob=1.0)
+        self.patch = patch
+        self.is_train = is_train
+        pixel_mean = [103.53, 116.28, 123.675]
+        self.mean = torch.tensor(pixel_mean, dtype=torch.float32).view(1, 3, 1, 1)
+
+    def _build_binary_masks(self, dataset_dict, h, w):
+        binary_masks = []
+
+        for anno in dataset_dict.get('annotations', []):
+            if anno.get('iscrowd', 0):
+                continue
+
+            mask = np.zeros((h, w), dtype=np.uint8)
+            segs = anno.get('segmentation', [])
+
+            if segs:
+                for seg in segs:
+                    poly = np.asarray(seg, dtype=np.float32).reshape(-1, 2)
+                    if poly.shape[0] < 3:
+                        continue
+                    cv2.fillPoly(mask, [poly.astype(np.int32)], 1)
+            else:
+                x1, y1, x2, y2 = np.asarray(anno['bbox'], dtype=np.float32)
+                x1, y1 = max(0, int(x1)), max(0, int(y1))
+                x2, y2 = min(w, int(x2)), min(h, int(y2))
+                if x2 > x1 and y2 > y1:
+                    mask[y1:y2, x1:x2] = 1
+
+            if mask.any():
+                binary_masks.append(mask)
+
+        return binary_masks
+
+    def __call__(self, dataset_dict):
+        dataset_dict = dataset_dict.copy()
+        image = detection_utils.read_image(dataset_dict['file_name'], format='BGR')
+        h, w = image.shape[:2]
+
+        image = torch.as_tensor(image.copy().transpose(2, 0, 1), dtype=torch.float32)
+        binary_masks = self._build_binary_masks(dataset_dict, h, w)
+
+        self.mean = self.mean.to(image.device)
+        image = image - self.mean[0]
+
+        if self.patch is not None:
+            self.patch = self.patch.to(image.device)
+
+        if self.poisoning_func in ['google', 'shapeShifter']:
+            adv_img = self.poison.google_poisoning(image, patch=self.patch, percentage=self.percentage, masks=binary_masks, training=False)
+        elif self.poisoning_func == 'Dpatch':
+            adv_img = self.poison.dpatch_poisoning(image, patch=self.patch, masks=binary_masks, training=False)
+        elif self.poisoning_func == 'scaleAdaptive':
+            adv_img = self.poison.scaleAdaptive_poisoning(image, patch=self.patch, alpha=self.percentage, masks=binary_masks, training=False)
+        elif self.poisoning_func == 'shapeAware':
+            adv_img = self.poison.shapeAware_poisoning(image, patch=self.patch, shape='ellipse', percentage=self.percentage, masks=binary_masks, training=False)
+        elif self.poisoning_func == 'pieceWise':
+            adv_img = self.poison.pieceWise_poisoning(image, patch=self.patch, shape='ellipse', percentage=self.percentage, masks=binary_masks, training=False)
+        else:
+            adv_img = image
+
+        adv_img = (adv_img + self.mean[0]).clamp(0, 255).to(torch.float32)
+
+        boxes = []
+        classes = []
+        for anno in dataset_dict.get('annotations', []):
+            if anno.get('iscrowd', 0):
+                continue
+            boxes.append(anno['bbox'])
+            classes.append(anno['category_id'])
+
+        instances = Instances((h, w))
+        if boxes:
+            box_tensor = torch.tensor(boxes, dtype=torch.float32)
+        else:
+            box_tensor = torch.zeros((0, 4), dtype=torch.float32)
+        instances.gt_boxes = Boxes(box_tensor)
+        instances.gt_classes = torch.tensor(classes, dtype=torch.int64)
+
+        dataset_dict['image'] = adv_img
+        dataset_dict['instances'] = instances
+        dataset_dict['height'] = h
+        dataset_dict['width'] = w
+        return dataset_dict
+        
 class Dataset:
     def __init__(self, name, category_id, random_id=False):
         self.name = name
@@ -378,6 +467,28 @@ class Dataset:
             val_loader = build_detection_train_loader(
                 dataset=val_dataset_dicts,
                 mapper=self.yolo_mapper,
+                total_batch_size=cfg['batch_size'])
+
+        return train_loader, val_loader
+
+    def yolo_poison_data_loaders(self, cfg, patch, percentage=0.6, poisoning_func=None, split='val'):
+        train_loader = None
+        val_loader = None
+
+        mapper = CustomPoisonMapperYOLO(cfg=cfg, is_train=False, patch=patch, percentage=percentage, poisoning_func=poisoning_func)
+
+        if split == 'both' or split == 'train':
+            train_dataset_dicts = get_detection_dataset_dicts(['train_data'], filter_empty=True)
+            train_loader = build_detection_train_loader(
+                dataset=train_dataset_dicts,
+                mapper=mapper,
+                total_batch_size=cfg['batch_size'])
+
+        if split == 'both' or split == 'val':
+            val_dataset_dicts = get_detection_dataset_dicts(['val_data'], filter_empty=True)
+            val_loader = build_detection_train_loader(
+                dataset=val_dataset_dicts,
+                mapper=mapper,
                 total_batch_size=cfg['batch_size'])
 
         return train_loader, val_loader
