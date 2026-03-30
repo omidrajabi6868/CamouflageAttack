@@ -67,12 +67,12 @@ class PPO:
         rewards = self.buffer.rewards
         dones = self.buffer.dones
 
-        with torch.no_grad():
-            values = self.buffer.values
-            advantages = self.compute_gae(rewards, values, dones)
-            advantages = torch.tensor(advantages)
-            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-            returns = advantages + torch.tensor(values)
+
+        values = self.buffer.values
+        advantages = self.compute_gae(rewards, values, dones)
+        advantages = torch.tensor(advantages)
+        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        returns = advantages + torch.tensor(values)
 
         logits = model(states)
         new_values = logits["value"]

@@ -464,10 +464,10 @@ class Dataset:
 
         if split == 'both' or split == 'val':
             val_dataset_dicts = get_detection_dataset_dicts(['val_data'], filter_empty=True)
-            val_loader = build_detection_train_loader(
+            val_loader = build_detection_test_loader(
                 dataset=val_dataset_dicts,
                 mapper=self.yolo_mapper,
-                total_batch_size=cfg['batch_size'])
+                batch_size=cfg['batch_size'])
 
         return train_loader, val_loader
 
@@ -486,10 +486,10 @@ class Dataset:
 
         if split == 'both' or split == 'val':
             val_dataset_dicts = get_detection_dataset_dicts(['val_data'], filter_empty=True)
-            val_loader = build_detection_train_loader(
+            val_loader = build_detection_test_loader(
                 dataset=val_dataset_dicts,
                 mapper=mapper,
-                total_batch_size=cfg['batch_size'])
+                batch_size=cfg['batch_size'])
 
         return train_loader, val_loader
 

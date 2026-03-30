@@ -264,7 +264,7 @@ class Attack:
 
         if self.attack_loss == "rl_optimization":
             ppo = PPO()
-            ppo_optimizer = torch.optim.Adam(ppo.controller.parameters(), lr=1e-3)
+            ppo_optimizer = torch.optim.Adam(ppo.controller.parameters(), lr=1e-2)
 
         print(f"Number of parameters to be trained is: {parameters_count}")
         optimizer = self.optimizer
@@ -296,9 +296,9 @@ class Attack:
                 elif self.poisoning_func == 'scaleAdaptive':
                     adv_image = poison.scaleAdaptive_poisoning(image.to(self.device), patch=patch, alpha=2.1, masks=binary_masks, training=True)
                 elif self.poisoning_func == 'shapeAware':
-                    adv_image = poison.shapeAware_poisoning(image.to(self.device), patch=patch, shape='ellipse', percentage=random.uniform(.2, .6), masks=binary_masks, training=True)
+                    adv_image = poison.shapeAware_poisoning(image.to(self.device), patch=patch, shape='ellipse', percentage=random.uniform(.2, .7), masks=binary_masks, training=True)
                 elif self.poisoning_func == "pieceWise":
-                    adv_image = poison.pieceWise_poisoning(image.to(self.device), patch=patch, shape='ellipse', percentage=0.8, masks=binary_masks, training=True)
+                    adv_image = poison.pieceWise_poisoning(image.to(self.device), patch=patch, shape='ellipse', percentage=0.6, masks=binary_masks, training=True)
                 else:
                     adv_image = None
 
@@ -395,8 +395,7 @@ class Attack:
                             optim_w.zero_grad(set_to_none=True)
                         elif self.attack_loss == "rl_optimization":
                             if epoch%2==0:
-                                ppo.controller.eval()
-                                if iteration == 0:
+                                if epoch < 2 and iteration == 0:
                                     proposals, _ = victim_model.proposal_generator(adv_inputs_for_detection,
                                                                                adv_features, gt_instances)
                                     ppo.buffer.clear()
@@ -443,8 +442,6 @@ class Attack:
                             ppo.buffer.actions[k].append(actions[k])
                             ppo.buffer.log_probs[k].append(log_probs[k])
 
-                        if done:
-                            break
                         del proposals
                                             
                     losses.append(loss.item())

@@ -330,7 +330,7 @@ class DetectionNetwork:
         if pretrained:
             model = load_pretrained_yolo(model, pretrained)
 
-        if self.model_path:
-            model.load_state_dict(torch.load(self.model_path))
+        # if self.model_path:
+        #     model.load_state_dict(torch.load(self.model_path))
 
         return model, cfg
