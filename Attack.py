@@ -164,17 +164,16 @@ class Attack:
     def gradnorm_penalty(self, task_losses, loss_weights, patch_params, L0, alpha=0.5):
         """
         Returns a scalar GradNorm penalty.  No tensor is modified in-place and
-        `create_graph=False` so ReLU-in-place inside the detector is harmless.
+        the gradient graph is preserved so the loss weights can be updated.
         """
         g_norm = []
 
-        # We only need first‑order gradients; do NOT build higher‑order graph.
         for i, Li in enumerate(task_losses):
             gi = torch.autograd.grad(
                 loss_weights[i] * Li,
                 patch_params,
                 retain_graph=True,
-                create_graph=False,
+                create_graph=True,
                 allow_unused=True
             )
             # allow_unused = True handles rare params not touched by a task
@@ -185,8 +184,10 @@ class Attack:
         g_norm = torch.stack(g_norm)                 # (N_TASKS,)
         g_avg  = g_norm.mean().detach()
 
-        # target ĝᵢ  =  ḡ · (Lᵢ/L₀ᵢ)^α   (no grad through ratios)
-        target = g_avg * ((task_losses.detach() / L0)**alpha)
+        # target ĝᵢ = ḡ · rᵢ^α, where rᵢ is the relative inverse training rate.
+        rates = task_losses.detach() / (L0 + 1e-8)
+        rates = rates / (rates.mean() + 1e-8)
+        target = g_avg * (rates ** alpha)
 
         # L1 penalty  Σ |gᵢ – ĝᵢ|
         return torch.nn.functional.l1_loss(g_norm, target, reduction='sum')
@@ -216,17 +217,15 @@ class Attack:
             adv_seg_loss
         ])
 
-        if epoch == 0:
+        if epoch == 0 and torch.count_nonzero(L0) == 0:
             L0.copy_(task_losses.detach())
         
         if training == True:
             gpen = self.gradnorm_penalty(task_losses, loss_weights, patch_param, L0, alpha=alpha)
+            weighted_patch_loss = (loss_weights.detach() * task_losses).sum()
+            return weighted_patch_loss, gpen
         else:
-            gpen = torch.tensor(0)
-
-        loss = (loss_weights * task_losses).sum() + gpen
-
-        return loss
+            return (loss_weights.detach() * task_losses).sum()
 
     def conduct_attack(self, victim_model, detection_net=None):
 
@@ -390,9 +389,9 @@ class Attack:
                             loss = self.random_sampling_loss(epoch, dict_losses, clean_features, adv_features, seg_outputs, target_masks)
                             del seg_outputs, adv_features, clean_features, target_masks
                         elif self.attack_loss == "grad_norm":
-                            loss = self.grad_norm_loss(epoch, [patch_param], L0, dict_losses, loss_weights, clean_features, adv_features, seg_outputs, target_masks, alpha=1.5, training=True)
+                            patch_loss, gradnorm_loss = self.grad_norm_loss(epoch, [patch_param], L0, dict_losses, loss_weights, clean_features, adv_features, seg_outputs, target_masks, alpha=1.5, training=True)
+                            loss = patch_loss
                             del seg_outputs, adv_features, clean_features, target_masks
-                            optim_w.zero_grad(set_to_none=True)
                         elif self.attack_loss == "rl_optimization":
                             if epoch%2==0:
                                 if iteration == 0:
@@ -417,17 +416,22 @@ class Attack:
                     else:
                         loss = None
 
-                    optimizer.zero_grad()
-                    loss.backward(retain_graph=False)
-                    # print(f"Memory Usage: {torch.cuda.memory_allocated() / 1024 ** 3:.2f} GiB")
-                    optimizer.step()
-
                     if self.attack_loss == "grad_norm":
+                        optim_w.zero_grad(set_to_none=True)
+                        gradnorm_loss.backward(retain_graph=True)
                         optim_w.step() 
                         with torch.no_grad():
                             loss_weights.data.clamp_(min=1e-8)
-                            loss_weights.data /= loss_weights.data.sum()
+                            loss_weights.data *= (loss_weights.numel() / loss_weights.data.sum())
                             print(loss_weights.data)
+                        optimizer.zero_grad(set_to_none=True)
+                        loss.backward(retain_graph=False)
+                        optimizer.step()
+                    else:
+                        optimizer.zero_grad(set_to_none=True)
+                        loss.backward(retain_graph=False)
+                        # print(f"Memory Usage: {torch.cuda.memory_allocated() / 1024 ** 3:.2f} GiB")
+                        optimizer.step()
                     
                     if self.attack_loss == "rl_optimization" and epoch%2==0:
                         proposals, _ = victim_model.proposal_generator(adv_inputs_for_detection,
