@@ -55,7 +55,6 @@ def main(args):
     output_dir = args.output_dir
     model_path = args.model_path
     model_config = args.model_config
-    transformer_based = args.transformer_based
     if multiclass:
         num_classes=80
     else:
@@ -68,7 +67,7 @@ def main(args):
                                          epoch_num=epoch_num,
                                          num_classes=num_classes,
                                          attack_name=attack_name)
-    if transformer_based:
+    if args.transformer_based:
         detection_model, cfg = detection_network.transformer_based_net(model_config=model_config, 
                                                                        train_data_len=train_data_len)
     else:
