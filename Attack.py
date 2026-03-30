@@ -263,7 +263,7 @@ class Attack:
             L0 = torch.zeros(7, device=self.device)    # will be filled after 1st step
 
         if self.attack_loss == "rl_optimization":
-            ppo = PPO()
+            ppo = PPO(device=self.device)
             ppo_optimizer = torch.optim.Adam(ppo.controller.parameters(), lr=1e-2)
 
         print(f"Number of parameters to be trained is: {parameters_count}")
@@ -395,7 +395,7 @@ class Attack:
                             optim_w.zero_grad(set_to_none=True)
                         elif self.attack_loss == "rl_optimization":
                             if epoch%2==0:
-                                if epoch < 2 and iteration == 0:
+                                if iteration == 0:
                                     proposals, _ = victim_model.proposal_generator(adv_inputs_for_detection,
                                                                                adv_features, gt_instances)
                                     ppo.buffer.clear()
@@ -403,14 +403,14 @@ class Attack:
 
                                 logits = ppo.controller(state)
                                 actions, log_probs = ppo.sample_actions(logits)
-                                optimizer.param_groups[0]["lr"] = 0.001*ppo.action_values[actions["lr"]]
-                                lambdas["rpn_cls"] = 1*ppo.action_values[actions["rpn_cls"]]
-                                lambdas["rpn_loc"] = 0.1*ppo.action_values[actions["rpn_loc"]]
-                                lambdas["roi_cls"] = 1*ppo.action_values[actions["roi_cls"]]
-                                lambdas["roi_loc"] = 0.1*ppo.action_values[actions["roi_loc"]]
-                                lambdas["feature"] = 1*ppo.action_values[actions["feature"]]
-                                lambdas["seg"] = 0.1*ppo.action_values[actions["seg"]]
-                                lambdas["mask"] = 1*ppo.action_values[actions["mask"]]
+                                optimizer.param_groups[0]["lr"] = float((0.001 * ppo.action_values[actions["lr"]]).item())
+                                lambdas["rpn_cls"] = float((1 * ppo.action_values[actions["rpn_cls"]]).item())
+                                lambdas["rpn_loc"] = float((0.1 * ppo.action_values[actions["rpn_loc"]]).item())
+                                lambdas["roi_cls"] = float((1 * ppo.action_values[actions["roi_cls"]]).item())
+                                lambdas["roi_loc"] = float((0.1 * ppo.action_values[actions["roi_loc"]]).item())
+                                lambdas["feature"] = float((1 * ppo.action_values[actions["feature"]]).item())
+                                lambdas["seg"] = float((0.1 * ppo.action_values[actions["seg"]]).item())
+                                lambdas["mask"] = float((1 * ppo.action_values[actions["mask"]]).item())
                             loss = self.fixed_weighted_loss(dict_losses, clean_features, adv_features, lambdas=lambdas, seg_outputs=seg_outputs, target_masks=target_masks)
                         else:
                             loss = None
@@ -434,13 +434,13 @@ class Attack:
                                                                                adv_features, gt_instances)
                         state, reward, done = ppo.compute_rewards(proposals, gt_instances, patch_param)
                         ppo.buffer.states.append(state)
-                        ppo.buffer.rewards.append(reward)
+                        ppo.buffer.rewards.append(float(reward.item()))
                         ppo.buffer.dones.append(done)
-                        ppo.buffer.values.append(logits["value"].item())
+                        ppo.buffer.values.append(float(logits["value"].item()))
 
                         for k in actions:
-                            ppo.buffer.actions[k].append(actions[k])
-                            ppo.buffer.log_probs[k].append(log_probs[k])
+                            ppo.buffer.actions[k].append(int(actions[k].item()))
+                            ppo.buffer.log_probs[k].append(float(log_probs[k].item()))
 
                         del proposals
                                             
