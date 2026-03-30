@@ -3,10 +3,15 @@ import torch.nn as nn
 from torch.distributions import Categorical
 
 class PPO:
-    def __init__(self):
-        self.action_values = torch.tensor([0.0008, 0.001, 0.008, 0.01, 0.8, 1.0, 1.25, 5, 10, 50, 100])
+    def __init__(self, device=None):
+        self.device = torch.device(device) if device is not None else torch.device("cpu")
+        self.action_values = torch.tensor(
+            [0.0008, 0.001, 0.008, 0.01, 0.8, 1.0, 1.25, 5, 10, 50, 100],
+            dtype=torch.float32,
+            device=self.device
+        )
         self.num_actions = len(self.action_values)
-        self.controller = PPOController(state_dim=4, NUM_ACTIONS=self.num_actions)
+        self.controller = PPOController(state_dim=4, NUM_ACTIONS=self.num_actions).to(self.device)
         self.buffer =  RolloutBuffer()
 
     def initial_state(self, proposals, gt_instances, patch):
@@ -27,7 +32,7 @@ class PPO:
 
     def compute_rewards(self, proposals, gt_instances, patch):
         # Extract metrics
-        N_boxes = sum(proposals[0].objectness_logits > 0)/(len(gt_instances[0].gt_classes) + 1e-8)
+        N_boxes = (proposals[0].objectness_logits > 0).sum().float() / (len(gt_instances[0].gt_classes) + 1e-8)
         max_conf = torch.max(proposals[0].objectness_logits)
         sum_conf = torch.sum(proposals[0].objectness_logits[proposals[0].objectness_logits > 0])
 
@@ -38,14 +43,19 @@ class PPO:
             -1.0 * max_conf
         )
 
-        next_state = torch.tensor([
-            N_boxes,
-            max_conf,
-            sum_conf,
-            0 if patch.grad == None else patch.grad.norm().item()
-        ])
+        grad_norm = torch.tensor(
+            0.0 if patch.grad is None else patch.grad.detach().norm().item(),
+            dtype=torch.float32,
+            device=self.device
+        )
+        next_state = torch.stack([
+            N_boxes.detach().to(self.device),
+            max_conf.detach().to(self.device),
+            sum_conf.detach().to(self.device),
+            grad_norm
+        ]).float()
 
-        done = float(N_boxes == 0)
+        done = float(N_boxes.item() == 0)
 
         return next_state, reward, done
 
@@ -63,16 +73,16 @@ class PPO:
 
     def ppo_update(self, model, optimizer, clip_eps=0.2, vf_coef=0.5, ent_coef=0.01):
         model.train()
-        states = torch.stack(self.buffer.states)
+        states = torch.stack(self.buffer.states).to(self.device)
         rewards = self.buffer.rewards
         dones = self.buffer.dones
 
 
         values = self.buffer.values
         advantages = self.compute_gae(rewards, values, dones)
-        advantages = torch.tensor(advantages)
+        advantages = torch.tensor(advantages, dtype=torch.float32, device=self.device)
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-        returns = advantages + torch.tensor(values)
+        returns = advantages + torch.tensor(values, dtype=torch.float32, device=self.device)
 
         logits = model(states)
         new_values = logits["value"]
