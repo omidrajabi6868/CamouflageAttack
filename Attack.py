@@ -31,6 +31,7 @@ class Attack:
         self.std = std.to(self.device)
         self.attack_loss = attack_loss
         self.save_name = save_name
+        self.log_interval = 25
 
     def go_loss(self, dict_losses):
         adv_loss = dict_losses['loss_cls']*(-1)
@@ -54,43 +55,28 @@ class Attack:
         
         return adv_loss
 
-    def equally_weighted_loss(self, dict_losses, clean_features, adv_features, seg_outputs=None, target_masks=None):
-        adv_rpn_cls = dict_losses['loss_rpn_cls']
-        adv_rpn_loc = dict_losses['loss_rpn_loc']
-        adv_roi_cls = torch.log1p(1 + (1/(dict_losses['loss_cls'] + 1e-6)))
-        adv_roi_loc = torch.log1p(1 + (1/(dict_losses['loss_box_reg'] + 1e-6)))
-        adv_loss_mask = torch.log1p(1 + (1/(dict_losses['loss_mask'] + 1e-6)))
-
+    def _compute_attack_terms(self, dict_losses, clean_features, adv_features, seg_outputs, target_masks):
         feature_loss = torch.nn.MSELoss()(clean_features['p2'], adv_features['p2'])
         for key in ['p3', 'p4', 'p5', 'p6']:
             feature_loss += torch.nn.MSELoss()(clean_features[key], adv_features[key])
-        
-        adv_feature_loss = torch.log1p(1 + (1/(feature_loss + 1e-6)))
+        return {
+            "rpn_cls": dict_losses['loss_rpn_cls'],
+            "rpn_loc": dict_losses['loss_rpn_loc'],
+            "roi_cls": torch.log1p(1 + (1/(dict_losses['loss_cls'] + 1e-6))),
+            "roi_loc": torch.log1p(1 + (1/(dict_losses['loss_box_reg'] + 1e-6))),
+            "mask": torch.log1p(1 + (1/(dict_losses['loss_mask'] + 1e-6))),
+            "feature": torch.log1p(1 + (1/(feature_loss + 1e-6))),
+            "seg": self.segmentation_loss(seg_outputs, target_masks),
+        }
 
-        adv_seg_loss = self.segmentation_loss(seg_outputs, target_masks)
-
-        adv_loss = adv_rpn_cls + adv_rpn_loc + adv_feature_loss + adv_seg_loss + adv_roi_cls + adv_roi_loc + adv_loss_mask
-
+    def equally_weighted_loss(self, dict_losses, clean_features, adv_features, seg_outputs=None, target_masks=None):
+        terms = self._compute_attack_terms(dict_losses, clean_features, adv_features, seg_outputs, target_masks)
+        adv_loss = sum(terms.values())
         return adv_loss
 
     def fixed_weighted_loss(self, dict_losses, clean_features, adv_features, lambdas, seg_outputs=None, target_masks=None):
-        adv_rpn_cls = (dict_losses['loss_rpn_cls'])*lambdas['rpn_cls']
-        adv_rpn_loc = dict_losses['loss_rpn_loc']*lambdas['rpn_loc']
-        adv_roi_cls = torch.log1p(1 + (1/(dict_losses['loss_cls'] + 1e-6)))*lambdas['roi_cls']
-        adv_roi_loc = torch.log1p(1 + (1/(dict_losses['loss_box_reg'] + 1e-6)))*lambdas['roi_loc']
-        adv_loss_mask = torch.log1p(1 + (1/(dict_losses['loss_mask'] + 1e-6)))*lambdas['mask']
-
-        feature_loss = torch.nn.MSELoss()(clean_features['p2'], adv_features['p2'])
-        for key in ['p3', 'p4', 'p5', 'p6']:
-            feature_loss += torch.nn.MSELoss()(clean_features[key], adv_features[key])
-        
-        adv_feature_loss = torch.log1p(1 + (1/(feature_loss + 1e-6)))*lambdas['feature']
-
-        adv_seg_loss = self.segmentation_loss(seg_outputs, target_masks)*lambdas['seg']
-
-        adv_loss = adv_rpn_cls + adv_rpn_loc + adv_feature_loss + adv_seg_loss + adv_roi_cls + adv_roi_loc + adv_loss_mask
-        # adv_loss = adv_roi_cls + adv_roi_loc + adv_feature_loss + adv_seg_loss + adv_loss_mask
-
+        terms = self._compute_attack_terms(dict_losses, clean_features, adv_features, seg_outputs, target_masks)
+        adv_loss = sum(terms[k] * lambdas[k] for k in terms.keys())
         return adv_loss
     
     def get_loss_weights(self, epoch, cycle_length=20):
@@ -105,6 +91,7 @@ class Attack:
                 "roi_cls": .8,
                 "segmentation": .1,
                 "feature": .1,
+                "mask": .1,
                 "box_reg": .0,
                 "rpn_loc": .0,
             }
@@ -113,18 +100,20 @@ class Attack:
                 "rpn_cls": .0,
                 "roi_cls": .5,
                 "segmentation": .2,
-                "feature": .3,
+                "feature": .2,
+                "mask": .2,
                 "box_reg": .0,
                 "rpn_loc": .0,
             }
         else:  
             return {
-                "rpn_cls": .1,
-                "roi_cls": .1,
-                "segmentation": .2,
-                "feature": .2,
-                "box_reg": .2,
-                "rpn_loc": .2,
+                "rpn_cls": .14,
+                "roi_cls": .14,
+                "segmentation": .14,
+                "feature": .14,
+                "mask": .14,
+                "box_reg": .14,
+                "rpn_loc": .16,
             }
 
     def sample_loss_type(self, epoch):
@@ -134,47 +123,34 @@ class Attack:
     def random_sampling_loss(self, epoch, dict_losses, clean_features, adv_features, seg_outputs=None, target_masks=None):
 
         selected_loss = self.sample_loss_type(epoch)
-           
-        if selected_loss == "rpn_cls":
-            loss = dict_losses['loss_rpn_cls']
-
-        elif selected_loss == "roi_cls":
-            loss = torch.log1p(1 + (1/(dict_losses['loss_cls'] + 1e-6)))
-
-        elif selected_loss == "segmentation":
-            loss = self.segmentation_loss(seg_outputs, target_masks)
-
-        elif selected_loss == "feature":
-            feature_loss = torch.nn.MSELoss()(clean_features['p2'], adv_features['p2'])
-            for key in ['p3', 'p4', 'p5', 'p6']:
-                feature_loss += torch.nn.MSELoss()(clean_features[key], adv_features[key])
-            loss = torch.log1p(1 + (1/(feature_loss + 1e-6)))
-
-        elif selected_loss == "box_reg":
-            loss = torch.log1p(1 + (1/(dict_losses['loss_box_reg'] + 1e-6)))
-
-        elif selected_loss == "rpn_loc":
-            loss = dict_losses['loss_rpn_loc']
-        
-        else:
-            loss = torch.tensor(0.0)
-
-        return loss
+        terms = self._compute_attack_terms(dict_losses, clean_features, adv_features, seg_outputs, target_masks)
+        choice_to_term = {
+            "rpn_cls": "rpn_cls",
+            "roi_cls": "roi_cls",
+            "segmentation": "seg",
+            "feature": "feature",
+            "mask": "mask",
+            "box_reg": "roi_loc",
+            "rpn_loc": "rpn_loc",
+        }
+        term_name = choice_to_term.get(selected_loss, None)
+        if term_name is None:
+            return torch.tensor(0.0, device=self.device), selected_loss
+        return terms[term_name], selected_loss
   
     def gradnorm_penalty(self, task_losses, loss_weights, patch_params, L0, alpha=0.5):
         """
         Returns a scalar GradNorm penalty.  No tensor is modified in-place and
-        `create_graph=False` so ReLU-in-place inside the detector is harmless.
+        the gradient graph is preserved so the loss weights can be updated.
         """
         g_norm = []
 
-        # We only need first‑order gradients; do NOT build higher‑order graph.
         for i, Li in enumerate(task_losses):
             gi = torch.autograd.grad(
                 loss_weights[i] * Li,
                 patch_params,
                 retain_graph=True,
-                create_graph=False,
+                create_graph=True,
                 allow_unused=True
             )
             # allow_unused = True handles rare params not touched by a task
@@ -185,48 +161,35 @@ class Attack:
         g_norm = torch.stack(g_norm)                 # (N_TASKS,)
         g_avg  = g_norm.mean().detach()
 
-        # target ĝᵢ  =  ḡ · (Lᵢ/L₀ᵢ)^α   (no grad through ratios)
-        target = g_avg * ((task_losses.detach() / L0)**alpha)
+        # target ĝᵢ = ḡ · rᵢ^α, where rᵢ is the relative inverse training rate.
+        rates = task_losses.detach() / (L0 + 1e-8)
+        rates = rates / (rates.mean() + 1e-8)
+        target = g_avg * (rates ** alpha)
 
         # L1 penalty  Σ |gᵢ – ĝᵢ|
         return torch.nn.functional.l1_loss(g_norm, target, reduction='sum')
 
     def grad_norm_loss(self, epoch, patch_param, L0, dict_losses, loss_weights, clean_features, adv_features, seg_outputs=None, target_masks=None, alpha=1.5, training=True):
-        adv_rpn_cls = dict_losses['loss_rpn_cls']
-        adv_rpn_loc = dict_losses['loss_rpn_loc']
-        adv_roi_cls = torch.log1p(1 + (1/(dict_losses['loss_cls'] + 1e-6)))
-        adv_roi_loc = torch.log1p(1 + (1/(dict_losses['loss_box_reg'] + 1e-6)))
-        adv_loss_mask = torch.log1p(1 + (1/(dict_losses['loss_mask'] + 1e-6)))
-
-        feature_loss = torch.nn.MSELoss()(clean_features['p2'], adv_features['p2'])
-        for key in ['p3', 'p4', 'p5', 'p6']:
-            feature_loss += torch.nn.MSELoss()(clean_features[key], adv_features[key])
-        
-        adv_feature_loss = torch.log1p(1 + (1/(feature_loss + 1e-6)))
-
-        adv_seg_loss = self.segmentation_loss(seg_outputs, target_masks)
-
+        terms = self._compute_attack_terms(dict_losses, clean_features, adv_features, seg_outputs, target_masks)
         task_losses = torch.stack([
-            adv_rpn_cls,              
-            adv_rpn_loc,                              
-            adv_roi_cls,                                
-            adv_roi_loc,       
-            adv_loss_mask,  
-            adv_feature_loss,
-            adv_seg_loss
+            terms["rpn_cls"],
+            terms["rpn_loc"],
+            terms["roi_cls"],
+            terms["roi_loc"],
+            terms["mask"],
+            terms["feature"],
+            terms["seg"],
         ])
 
-        if epoch == 0:
+        if epoch == 0 and torch.count_nonzero(L0) == 0:
             L0.copy_(task_losses.detach())
         
         if training == True:
             gpen = self.gradnorm_penalty(task_losses, loss_weights, patch_param, L0, alpha=alpha)
+            weighted_patch_loss = (loss_weights.detach() * task_losses).sum()
+            return weighted_patch_loss, gpen
         else:
-            gpen = torch.tensor(0)
-
-        loss = (loss_weights * task_losses).sum() + gpen
-
-        return loss
+            return (loss_weights.detach() * task_losses).sum()
 
     def conduct_attack(self, victim_model, detection_net=None):
 
@@ -387,12 +350,12 @@ class Attack:
                             loss = self.fixed_weighted_loss(dict_losses, clean_features, adv_features, lambdas=lambdas, seg_outputs=seg_outputs, target_masks=target_masks)
                             del seg_outputs, adv_features, clean_features, target_masks
                         elif self.attack_loss == "random_sampling":
-                            loss = self.random_sampling_loss(epoch, dict_losses, clean_features, adv_features, seg_outputs, target_masks)
+                            loss, sampled_loss_name = self.random_sampling_loss(epoch, dict_losses, clean_features, adv_features, seg_outputs, target_masks)
                             del seg_outputs, adv_features, clean_features, target_masks
                         elif self.attack_loss == "grad_norm":
-                            loss = self.grad_norm_loss(epoch, [patch_param], L0, dict_losses, loss_weights, clean_features, adv_features, seg_outputs, target_masks, alpha=1.5, training=True)
+                            patch_loss, gradnorm_loss = self.grad_norm_loss(epoch, [patch_param], L0, dict_losses, loss_weights, clean_features, adv_features, seg_outputs, target_masks, alpha=1.5, training=True)
+                            loss = patch_loss
                             del seg_outputs, adv_features, clean_features, target_masks
-                            optim_w.zero_grad(set_to_none=True)
                         elif self.attack_loss == "rl_optimization":
                             if epoch%2==0:
                                 if iteration == 0:
@@ -417,17 +380,32 @@ class Attack:
                     else:
                         loss = None
 
-                    optimizer.zero_grad()
-                    loss.backward(retain_graph=False)
-                    # print(f"Memory Usage: {torch.cuda.memory_allocated() / 1024 ** 3:.2f} GiB")
-                    optimizer.step()
-
                     if self.attack_loss == "grad_norm":
+                        optim_w.zero_grad(set_to_none=True)
+                        gradnorm_loss.backward(retain_graph=True)
                         optim_w.step() 
                         with torch.no_grad():
                             loss_weights.data.clamp_(min=1e-8)
-                            loss_weights.data /= loss_weights.data.sum()
+                            loss_weights.data *= (loss_weights.numel() / loss_weights.data.sum())
                             print(loss_weights.data)
+                        optimizer.zero_grad(set_to_none=True)
+                        loss.backward(retain_graph=False)
+                        optimizer.step()
+                    else:
+                        optimizer.zero_grad(set_to_none=True)
+                        loss.backward(retain_graph=False)
+                        # print(f"Memory Usage: {torch.cuda.memory_allocated() / 1024 ** 3:.2f} GiB")
+                        optimizer.step()
+
+                    if iteration % self.log_interval == 0 and self.attack_loss in ['equally_weighted', 'fixed_weighted', 'random_sampling', 'grad_norm']:
+                        log_message = f"[train] epoch={epoch} iter={iteration} mode={self.attack_loss} loss={loss.item():.6f}"
+                        if self.attack_loss == "fixed_weighted":
+                            log_message += f" lambdas={{{', '.join([f'{k}:{v:.3e}' for k, v in lambdas.items()])}}}"
+                        elif self.attack_loss == "random_sampling":
+                            log_message += f" sampled={sampled_loss_name}"
+                        elif self.attack_loss == "grad_norm":
+                            log_message += f" gradnorm={gradnorm_loss.item():.6f} weights={loss_weights.detach().cpu().numpy().round(4).tolist()}"
+                        logger.info(log_message)
                     
                     if self.attack_loss == "rl_optimization" and epoch%2==0:
                         proposals, _ = victim_model.proposal_generator(adv_inputs_for_detection,
@@ -501,7 +479,7 @@ class Attack:
                                     loss = self.fixed_weighted_loss(dict_losses, clean_features, adv_features, lambdas=lambdas, seg_outputs=seg_outputs, target_masks=target_masks)
                                     del seg_outputs, adv_features, clean_features, target_masks
                                 elif self.attack_loss == "random_sampling":
-                                    loss = self.fixed_weighted_loss(dict_losses, clean_features, adv_features, lambdas=lambdas, seg_outputs=seg_outputs, target_masks=target_masks)
+                                    loss, _ = self.random_sampling_loss(epoch, dict_losses, clean_features, adv_features, seg_outputs, target_masks)
                                     del seg_outputs, adv_features, clean_features, target_masks
                                 elif self.attack_loss == "grad_norm":
                                     loss = self.grad_norm_loss(epoch, [patch_param], L0, dict_losses, loss_weights, clean_features, adv_features, seg_outputs, target_masks, alpha=1.5, training=False)
