@@ -32,6 +32,9 @@ class Attack:
         self.attack_loss = attack_loss
         self.save_name = save_name
         self.log_interval = 25
+        # GradNorm is memory intensive because it relies on higher-order gradients.
+        # Update GradNorm weights less frequently to reduce peak memory pressure.
+        self.gradnorm_update_interval = 2
 
     def go_loss(self, dict_losses):
         adv_loss = dict_losses['loss_cls']*(-1)
@@ -153,10 +156,14 @@ class Attack:
                 create_graph=True,
                 allow_unused=True
             )
-            # allow_unused = True handles rare params not touched by a task
-            flat = torch.cat([g.reshape(-1) for g in gi if g is not None])
-            g_norm.append(torch.norm(flat, p=2))
-            del gi, flat  # free right away
+            # allow_unused = True handles rare params not touched by a task.
+            # Avoid torch.cat on full flattened gradients to keep memory lower.
+            sq_norm = torch.zeros((), device=self.device)
+            for g in gi:
+                if g is not None:
+                    sq_norm = sq_norm + g.pow(2).sum()
+            g_norm.append(torch.sqrt(sq_norm + 1e-12))
+            del gi, sq_norm  # free right away
 
         g_norm = torch.stack(g_norm)                 # (N_TASKS,)
         g_avg  = g_norm.mean().detach()
@@ -169,7 +176,7 @@ class Attack:
         # L1 penalty  Σ |gᵢ – ĝᵢ|
         return torch.nn.functional.l1_loss(g_norm, target, reduction='sum')
 
-    def grad_norm_loss(self, epoch, patch_param, L0, dict_losses, loss_weights, clean_features, adv_features, seg_outputs=None, target_masks=None, alpha=1.5, training=True):
+    def grad_norm_loss(self, epoch, patch_param, L0, dict_losses, loss_weights, clean_features, adv_features, seg_outputs=None, target_masks=None, alpha=1.5, training=True, compute_gpen=True):
         terms = self._compute_attack_terms(dict_losses, clean_features, adv_features, seg_outputs, target_masks)
         task_losses = torch.stack([
             terms["rpn_cls"],
@@ -185,7 +192,9 @@ class Attack:
             L0.copy_(task_losses.detach())
         
         if training == True:
-            gpen = self.gradnorm_penalty(task_losses, loss_weights, patch_param, L0, alpha=alpha)
+            gpen = None
+            if compute_gpen:
+                gpen = self.gradnorm_penalty(task_losses, loss_weights, patch_param, L0, alpha=alpha)
             weighted_patch_loss = (loss_weights.detach() * task_losses).sum()
             return weighted_patch_loss, gpen
         else:
@@ -353,7 +362,21 @@ class Attack:
                             loss, sampled_loss_name = self.random_sampling_loss(epoch, dict_losses, clean_features, adv_features, seg_outputs, target_masks)
                             del seg_outputs, adv_features, clean_features, target_masks
                         elif self.attack_loss == "grad_norm":
-                            patch_loss, gradnorm_loss = self.grad_norm_loss(epoch, [patch_param], L0, dict_losses, loss_weights, clean_features, adv_features, seg_outputs, target_masks, alpha=1.5, training=True)
+                            should_update_gradnorm = (iteration % self.gradnorm_update_interval == 0)
+                            patch_loss, gradnorm_loss = self.grad_norm_loss(
+                                epoch,
+                                [patch_param],
+                                L0,
+                                dict_losses,
+                                loss_weights,
+                                clean_features,
+                                adv_features,
+                                seg_outputs,
+                                target_masks,
+                                alpha=1.5,
+                                training=True,
+                                compute_gpen=should_update_gradnorm
+                            )
                             loss = patch_loss
                             del seg_outputs, adv_features, clean_features, target_masks
                         elif self.attack_loss == "rl_optimization":
@@ -381,13 +404,14 @@ class Attack:
                         loss = None
 
                     if self.attack_loss == "grad_norm":
-                        optim_w.zero_grad(set_to_none=True)
-                        gradnorm_loss.backward(retain_graph=True)
-                        optim_w.step() 
-                        with torch.no_grad():
-                            loss_weights.data.clamp_(min=1e-8)
-                            loss_weights.data *= (loss_weights.numel() / loss_weights.data.sum())
-                            print(loss_weights.data)
+                        if gradnorm_loss is not None:
+                            optim_w.zero_grad(set_to_none=True)
+                            gradnorm_loss.backward(retain_graph=True)
+                            optim_w.step() 
+                            with torch.no_grad():
+                                loss_weights.data.clamp_(min=1e-8)
+                                loss_weights.data *= (loss_weights.numel() / loss_weights.data.sum())
+                                print(loss_weights.data)
                         optimizer.zero_grad(set_to_none=True)
                         loss.backward(retain_graph=False)
                         optimizer.step()
@@ -404,7 +428,8 @@ class Attack:
                         elif self.attack_loss == "random_sampling":
                             log_message += f" sampled={sampled_loss_name}"
                         elif self.attack_loss == "grad_norm":
-                            log_message += f" gradnorm={gradnorm_loss.item():.6f} weights={loss_weights.detach().cpu().numpy().round(4).tolist()}"
+                            gradnorm_value = float("nan") if gradnorm_loss is None else gradnorm_loss.item()
+                            log_message += f" gradnorm={gradnorm_value:.6f} weights={loss_weights.detach().cpu().numpy().round(4).tolist()}"
                         logger.info(log_message)
                     
                     if self.attack_loss == "rl_optimization" and epoch%2==0:
