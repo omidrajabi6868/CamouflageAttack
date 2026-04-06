@@ -1,7 +1,7 @@
 #!/bin/bash
-#SBATCH --job-name=rl_optimization
-#SBATCH --error=outputs/rl_optimization.txt
-#SBATCH --output=outputs/rl_optimization.txt
+#SBATCH --job-name=grad_norm
+#SBATCH --error=outputs/grad_norm.txt
+#SBATCH --output=outputs/grad_norm.txt
 #SBATCH --ntasks=4
 #SBATCH --cpus-per-task=4
 #SBATCH --partition=high-gpu-mem
@@ -20,5 +20,5 @@ crun python TheMain.py \
     --output_dir /home/oraja001/airbus_ship/AdversarialProject/outputs/mask_rcnn_R_101_FPN_3x_one_class/ \
     --model_path /home/oraja001/airbus_ship/AdversarialProject/trained_models/mask_rcnn_R_101_FPN_3x/model_final_ship.pth \
     --model_config COCO-InstanceSegmentation/mask_rcnn_R_101_FPN_3x.yaml \
-    --attack_loss rl_optimization \
-    --save_name rl_optimization
+    --attack_loss grad_norm \
+    --save_name grad_norm_ship
