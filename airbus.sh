@@ -14,7 +14,7 @@ module load container_env pytorch-gpu/2.2.0
 crun python TheMain.py \
     --dataset_name airbus \
     --attack_name shapeAware \
-    --batch_size 16 \
+    --batch_size 8 \
     --optimizer Adam \
     --learning_rate 1e-4 \
     --output_dir /home/oraja001/airbus_ship/AdversarialProject/outputs/mask_rcnn_R_101_FPN_3x_one_class/ \
