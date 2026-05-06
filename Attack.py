@@ -57,7 +57,7 @@ class Attack:
         adv_objectness_loss = (-1)*(dict_losses['loss_cls'])
         loss_tv = TVLoss()(patch.unsqueeze(0)/57.3750)
         loss_nps= NPSLoss()(patch.unsqueeze(0)/57.3750)
-        adv_loss = 0.2*adv_bbox_loss + adv_objectness_loss + 2.5*loss_tv + 0.01*loss_nps
+        adv_loss = 0.2*adv_bbox_loss + adv_objectness_loss + loss_tv + 0.01*loss_nps
         return adv_loss
 
     def segmentation_loss(self, seg_outputs, target_masks):
