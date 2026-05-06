@@ -555,7 +555,7 @@ class Poison:
                     bbox = region.bbox
                     orientation = orientation - (np.pi / 2)
 
-                    sp = int(math.sqrt(percentage*(region.axis_major_length//2)*(region.axis_minor_length//2)))
+                    sp = int(math.sqrt(percentage*(region.axis_major_length//2)*(region.axis_minor_length//2))) + 1
 
                      # --- patch transform ---
                     transform_type = random.choice(["rotate", "translate", "scale", "bright_shift", "none"])
@@ -569,7 +569,7 @@ class Poison:
                         ty = random.randint(-max_dy, max_dy)
                         patch_t = self._apply_affine_torch(patch, angle_deg=0.0, translate=(tx, ty))
                     elif training and transform_type == "scale":
-                        scale = random.uniform(0.5, 2.)
+                        scale = random.uniform(1., 2.5)
                         patch_t = self._apply_affine_torch(patch, angle_deg=0.0, scale=scale)
                     elif training and transform_type == "bright_shift":
                         brightness_shift = random.uniform(-0.1, 0.1)
@@ -581,7 +581,8 @@ class Poison:
                     patch_t = F.interpolate(patch_t.unsqueeze(0), size=(sp, sp), mode='bilinear', align_corners=False).squeeze(0)
 
     
-                    mask_one[:, int(x0) - sp//2:  int(x0) + sp//2, int(y0) - sp//2:int(y0) + sp//2] = patch_t[:, :2*(sp//2), :2*(sp//2)]
+                    temp = mask_one[:, int(x0) - sp//2:  int(x0) + sp//2, int(y0) - sp//2:int(y0) + sp//2]
+                    mask_one[:, int(x0) - sp//2:  int(x0) + sp//2, int(y0) - sp//2:int(y0) + sp//2] = patch_t[:, :int(temp.shape[1]), :int(temp.shape[2])]
                     mask_zero[:, int(x0) - sp//2:  int(x0) + sp//2, int(y0) - sp//2:int(y0) + sp//2] = 0
 
         poisoned_image = img * mask_zero + mask_one

@@ -282,7 +282,7 @@ class Attack:
                 elif self.poisoning_func == "pieceWise":
                     adv_image = poison.pieceWise_poisoning(image.to(self.device), patch=patch, shape='ellipse', percentage=0.6, masks=binary_masks, training=True)
                 elif self.poisoning_func == "shipCamou":
-                    adv_image = poison.shipCamou_poisoning(image.to(self.device), patch=patch, shape=None, percentage=0.6, masks=binary_masks, training=True)
+                    adv_image = poison.shipCamou_poisoning(image.to(self.device), patch=patch, shape=None, percentage=1.0, masks=binary_masks, training=True)
                 else:
                     adv_image = None
 
