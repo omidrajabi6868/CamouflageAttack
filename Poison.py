@@ -12,21 +12,47 @@ from skimage.measure import label, regionprops
 class Poison:
     def __init__(self, prob):
         self.prob = prob
-
-    def _apply_affine_torch(self, patch, angle_deg=0.0, translate=(0, 0), scale=1.0):
+    
+    def _apply_affine_torch(self,
+                            patch,
+                            angle_deg=0.0,
+                            translate=(0, 0),
+                            scale=1.0,
+                            brightness_shift=0.0,
+                            contrast_scale=1.0):
         """
-        Apply affine transform (scale -> rotate -> translate) to a patch using affine_grid+grid_sample.
+        Apply affine transform (scale -> rotate -> translate) to a patch
+        using affine_grid + grid_sample, then apply light shifting.
+
         patch: (C, h, w)
         angle_deg: rotation in degrees (positive = counter-clockwise)
         translate: (tx_pixels, ty_pixels) in patch pixel coords
         scale: uniform scaling factor
-        Returns transformed patch (C, h, w) with same output size as input patch (padding with zeros).
+
+        brightness_shift:
+            Additive brightness change.
+            Example:
+                0.1  -> brighter
+            -0.1  -> darker
+
+        contrast_scale:
+            Multiplicative contrast factor.
+            Example:
+                1.2 -> more contrast
+                0.8 -> lower contrast
+
+        Returns:
+            transformed patch (C, h, w)
+
         Fully differentiable.
         """
+
         C, H, W = patch.shape
         device = patch.device
+
         # build theta (1,2,3)
         angle = torch.tensor(angle_deg * np.pi / 180.0, device=device)
+
         cos = torch.cos(angle)
         sin = torch.sin(angle)
 
@@ -37,6 +63,7 @@ class Poison:
         d = scale * cos
 
         theta = torch.zeros((1, 2, 3), dtype=torch.float, device=device)
+
         theta[0, 0, 0] = a
         theta[0, 0, 1] = b
         theta[0, 1, 0] = c
@@ -47,24 +74,54 @@ class Poison:
             tx = ty = 0.0
         else:
             tx_pixels, ty_pixels = translate
-            # normalized: 2*tx/(W-1), 2*ty/(H-1) (note: x corresponds to width axis)
+
             if W > 1:
                 tx = 2.0 * float(tx_pixels) / (W - 1)
             else:
                 tx = 0.0
+
             if H > 1:
                 ty = 2.0 * float(ty_pixels) / (H - 1)
             else:
                 ty = 0.0
+
         theta[0, 0, 2] = tx
         theta[0, 1, 2] = ty
 
         # sample grid
         patch_b = patch.unsqueeze(0)  # (1,C,H,W)
-        grid = F.affine_grid(theta, patch_b.size(), align_corners=False)  # (1,H,W,2)
-        out = F.grid_sample(patch_b, grid, mode='bilinear', padding_mode='zeros', align_corners=False)
 
-        return out.squeeze(0)  # (C, H, W)
+        grid = F.affine_grid(
+            theta,
+            patch_b.size(),
+            align_corners=False
+        )
+
+        out = F.grid_sample(
+            patch_b,
+            grid,
+            mode='bilinear',
+            padding_mode='zeros',
+            align_corners=False
+        )
+
+        out = out.squeeze(0)  # (C,H,W)
+
+        # ---------------------------------------------------------
+        # Light shifting augmentation
+        # ---------------------------------------------------------
+
+        # Contrast adjustment around mean
+        mean = out.mean(dim=(1, 2), keepdim=True)
+        out = (out - mean) * contrast_scale + mean
+
+        # Brightness shift
+        out = out + brightness_shift
+
+        # Optional clamp if patch values are normalized to [0,1]
+        out = torch.clamp(out, 0.0, 1.0)
+
+        return out
     
     def google_poisoning(self, image, patch, percentage, masks, training=True):
         """
@@ -480,11 +537,56 @@ class Poison:
         
         return poisoned_image
 
+    def shipCamou_poisoning(self, img, patch, shape, percentage, masks, training=True):
+        device = img.device
+        img = img.to(device)
+        patch = patch.to(device)
 
-                    
-                    
+        mask_one = torch.zeros((3, img.shape[1], img.shape[2])).to(device)
+        mask_zero = torch.ones((3, img.shape[1], img.shape[2])).to(device)
 
+        for mask in masks:
+            lbl = label(mask)
+            regions = regionprops(lbl)
+            if random.random() < self.prob:
+                for region in regions:
+                    x0, y0 = region.centroid
+                    orientation = region.orientation
+                    bbox = region.bbox
+                    orientation = orientation - (np.pi / 2)
 
+                    sp = int(math.sqrt(percentage*(region.axis_major_length//2)*(region.axis_minor_length//2)))
+
+                     # --- patch transform ---
+                    transform_type = random.choice(["rotate", "translate", "scale", "bright_shift", "none"])
+                    if training and transform_type == "rotate":
+                        angle = random.uniform(-30, 30)
+                        patch_t = self._apply_affine_torch(patch, angle_deg=angle)
+                    elif training and transform_type == "translate":
+                        max_dx = max(1, patch.shape[2] // 10)
+                        max_dy = max(1, patch.shape[1] // 10)
+                        tx = random.randint(-max_dx, max_dx)
+                        ty = random.randint(-max_dy, max_dy)
+                        patch_t = self._apply_affine_torch(patch, angle_deg=0.0, translate=(tx, ty))
+                    elif training and transform_type == "scale":
+                        scale = random.uniform(0.5, 2.)
+                        patch_t = self._apply_affine_torch(patch, angle_deg=0.0, scale=scale)
+                    elif training and transform_type == "bright_shift":
+                        brightness_shift = random.uniform(-0.1, 0.1)
+                        contrast_scale = random.uniform(0.8, 1.2)
+                        patch_t = self._apply_affine_torch(patch,  brightness_shift=brightness_shift, contrast_scale=contrast_scale)
+                    else:
+                        patch_t = patch
+
+                    patch_t = F.interpolate(patch_t.unsqueeze(0), size=(sp, sp), mode='bilinear', align_corners=False).squeeze(0)
+
+    
+                    mask_one[:, int(x0) - sp//2:  int(x0) + sp//2, int(y0) - sp//2:int(y0) + sp//2] = patch_t[:, :2*(sp//2), :2*(sp//2)]
+                    mask_zero[:, int(x0) - sp//2:  int(x0) + sp//2, int(y0) - sp//2:int(y0) + sp//2] = 0
+
+        poisoned_image = img * mask_zero + mask_one
+
+        return poisoned_image
                     
                     
                     

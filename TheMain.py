@@ -112,8 +112,8 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="")
     parser.add_argument("--dataset_name", type=str, default="airbus")
     parser.add_argument("--img_dir", type=str, default="/home/oraja001/airbus_ship/airbus/train_v2")
-    parser.add_argument("--attack_name", type=str, default="shapeAware")
-    parser.add_argument("--poisoning_func", type=str, default="shapeAware")
+    parser.add_argument("--attack_name", type=str, default="shipCamou")
+    parser.add_argument("--poisoning_func", type=str, default="shipCamou")
     parser.add_argument("--multiclass", type=bool, default=False)
     parser.add_argument("--epoch_num", type=int, default=300)
     parser.add_argument("--batch_size", type=int, default=16)
@@ -128,8 +128,8 @@ if __name__ == '__main__':
     parser.add_argument("--model_config", type=str, default="COCO-InstanceSegmentation/mask_rcnn_R_101_FPN_3x.yaml")
     parser.add_argument("--transformer_based", type=bool, default=False)
 
-    parser.add_argument("--attack_loss", type=str, default='fixed_weighted')
-    parser.add_argument("--save_name", type=str, default='shapeAware')
+    parser.add_argument("--attack_loss", type=str, default='shipCamou')
+    parser.add_argument("--save_name", type=str, default='shipCamou')
     parser.add_argument("--optimizer", type=str, default='Adam')
 
 

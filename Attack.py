@@ -8,7 +8,7 @@ from detectron2.utils.events import EventStorage, get_event_storage
 
 from Poison import Poison
 from UViT import UViT
-from Network import UNet, IUNet, ParameterRender, CustomLoss
+from Network import UNet, IUNet, ParameterRender, CustomLoss, TVLoss, NPSLoss
 from PPO import PPO, RolloutBuffer
 
 import logging
@@ -45,13 +45,21 @@ class Attack:
         return adv_loss
     
     def ss_multiclass_loss(self, dict_losses):
-        adv_loss = (dict_losses['loss_rpn_cls']) + (dict_losses['loss_cls'])
+        adv_loss = (-1)*(dict_losses['loss_rpn_cls']) + (-1)*(dict_losses['loss_cls'])
         return adv_loss    
     
     def as_loss(self, dict_losses):
         adv_loss = (-1)*dict_losses['loss_rpn_cls']
         return adv_loss
     
+    def shipCamou_loss(self, dict_losses, patch):
+        adv_bbox_loss = (-1)*(dict_losses['loss_box_reg']) 
+        adv_objectness_loss = (-1)*(dict_losses['loss_cls'])
+        loss_tv = TVLoss()(patch.unsqueeze(0)/57.3750)
+        loss_nps= NPSLoss()(patch.unsqueeze(0)/57.3750)
+        adv_loss = 0.2*adv_bbox_loss + adv_objectness_loss + 2.5*loss_tv + 0.01*loss_nps
+        return adv_loss
+
     def segmentation_loss(self, seg_outputs, target_masks):
         adv_loss = CustomLoss(alpha=0.25, gamma=2, focal_coef=1e-2, bce_coef=1,
                                dice_coef=1e-2, logit_penalty_coef=1e-2)(seg_outputs, target_masks)
@@ -208,6 +216,8 @@ class Attack:
             patch_param = torch.randn(size=(3, 32, 32), device=self.device)
         elif self.name == 'scaleAdaptive':
             patch_param = torch.randn(size=(3, 30, 30), device=self.device)
+        elif self.name == 'shipCamou':
+            patch_param = torch.randn(size=(3, 64, 64), device=self.device)
         elif self.name == 'shapeAware':
             patch_param = torch.randn(size=(3, 768, 768), device=self.device)
         else:
@@ -271,6 +281,8 @@ class Attack:
                     adv_image = poison.shapeAware_poisoning(image.to(self.device), patch=patch, shape='ellipse', percentage=random.uniform(.2, .7), masks=binary_masks, training=True)
                 elif self.poisoning_func == "pieceWise":
                     adv_image = poison.pieceWise_poisoning(image.to(self.device), patch=patch, shape='ellipse', percentage=0.6, masks=binary_masks, training=True)
+                elif self.poisoning_func == "shipCamou":
+                    adv_image = poison.shipCamou_poisoning(image.to(self.device), patch=patch, shape=None, percentage=0.6, masks=binary_masks, training=True)
                 else:
                     adv_image = None
 
@@ -332,7 +344,9 @@ class Attack:
                     elif self.attack_loss == 'ss_multiclass':
                         loss = self.ss_multiclass_loss(dict_losses)
                     elif self.attack_loss == 'sa':
-                         loss = self.as_loss(dict_losses)
+                        loss = self.as_loss(dict_losses)
+                    elif self.attack_loss == 'shipCamou':
+                        loss = self.shipCamou_loss(dict_losses, patch)
                     elif self.attack_loss in ['equally_weighted', 'fixed_weighted', 'random_sampling', 'grad_norm', 'rl_optimization']:
                         target_masks = torch.tensor(
                             [polygons_to_binary_mask(d['instances'].gt_masks.polygons, d['image'].shape[1], d['image'].shape[2]) for d in batch_inputs]
@@ -480,6 +494,8 @@ class Attack:
                                 loss = self.ss_multiclass_loss(dict_losses)
                             elif self.attack_loss == 'sa':
                                 loss = self.as_loss(dict_losses)
+                            elif self.attack_loss == 'shipCamou':
+                                loss = self.shipCamou_loss(dict_losses, patch)
                             elif self.attack_loss in ['equally_weighted', 'fixed_weighted', 'random_sampling', 'grad_norm', 'rl_optimization']:
                                 target_masks = torch.tensor(
                                     [polygons_to_binary_mask(d['instances'].gt_masks.polygons, d['image'].shape[1], d['image'].shape[2]) for d in batch_inputs]
