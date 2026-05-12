@@ -123,6 +123,159 @@ class Poison:
 
         return out
     
+    def _apply_weather_and_light_transform(
+        self,
+        region,
+        brightness_shift=0.0,
+        darkness_factor=1.0,
+        rain_strength=0.0,
+        blur_kernel_size=0,
+        blur_sigma=1.0):
+        """
+        Apply appearance-only transformations to a patch.
+
+        Supported effects:
+            - Brightening
+            - Darkening
+            - Rain simulation
+            - Gaussian blur
+
+        Args:
+            patch: Tensor (C, H, W)
+
+            brightness_shift:
+                Additive brightness.
+                Example:
+                    0.1  -> brighter
+                -0.1  -> darker
+
+            darkness_factor:
+                Multiplicative darkening factor.
+                Example:
+                    1.0 -> unchanged
+                    0.7 -> darker
+                    0.4 -> much darker
+
+            rain_strength:
+                Controls amount of synthetic rain.
+                Recommended range:
+                    0.0 ~ 0.4
+
+            blur_kernel_size:
+                Gaussian blur kernel size.
+                Must be odd.
+                Example:
+                    0 -> no blur
+                    3,5,7,...
+
+            blur_sigma:
+                Gaussian blur sigma.
+
+        Returns:
+            Transformed patch (C, H, W)
+
+        Fully differentiable except stochastic rain mask generation.
+        """
+
+        device = region.device
+        C, H, W = region.shape
+
+        out = region.clone()
+
+        # ---------------------------------------------------------
+        # 1. Brightening / Darkening
+        # ---------------------------------------------------------
+
+        out = out * darkness_factor
+        out = out + brightness_shift
+
+        # ---------------------------------------------------------
+        # 2. Synthetic Rain
+        # ---------------------------------------------------------
+
+        if rain_strength > 0.0:
+
+            # Random sparse noise
+            rain_mask = torch.rand((1, H, W), device=device)
+
+            # Keep only sparse pixels
+            threshold = 1.0 - rain_strength * 0.15
+            rain_mask = (rain_mask > threshold).float()
+
+            # Create vertical streak effect
+            streak_length = max(3, H // 20)
+
+            kernel = torch.ones(
+                (1, 1, streak_length, 1),
+                device=device
+            )
+
+            rain_mask = F.conv2d(
+                rain_mask.unsqueeze(0),
+                kernel,
+                padding=(streak_length // 2, 0)
+            ).squeeze(0)
+
+            # Normalize rain
+            rain_mask = rain_mask / (rain_mask.max() + 1e-8)
+
+            # Expand to channels
+            rain_mask = rain_mask.repeat(C, 1, 1)
+
+            # Blend rain into image
+            out = out + rain_strength * 0.35 * rain_mask
+
+        # ---------------------------------------------------------
+        # 3. Gaussian Blur
+        # ---------------------------------------------------------
+
+        if blur_kernel_size > 1:
+
+            if blur_kernel_size % 2 == 0:
+                raise ValueError("blur_kernel_size must be odd")
+
+            k = blur_kernel_size
+            sigma = blur_sigma
+
+            coords = torch.arange(k, device=device) - k // 2
+
+            g = torch.exp(-(coords ** 2) / (2 * sigma ** 2))
+            g = g / g.sum()
+
+            # Separable Gaussian kernels
+            kernel_x = g.view(1, 1, 1, k)
+            kernel_y = g.view(1, 1, k, 1)
+
+            out_b = out.unsqueeze(0)
+
+            # Depthwise conv
+            kernel_x = kernel_x.repeat(C, 1, 1, 1)
+            kernel_y = kernel_y.repeat(C, 1, 1, 1)
+
+            out_b = F.conv2d(
+                out_b,
+                kernel_x,
+                padding=(0, k // 2),
+                groups=C
+            )
+
+            out_b = F.conv2d(
+                out_b,
+                kernel_y,
+                padding=(k // 2, 0),
+                groups=C
+            )
+
+            out = out_b.squeeze(0)
+
+        # ---------------------------------------------------------
+        # Final clamp
+        # ---------------------------------------------------------
+
+        out = torch.clamp(out, 0.0, 1.0)
+
+        return out
+
     def google_poisoning(self, image, patch, percentage, masks, training=True):
         """
         Places adversarial patch inside an ellipse-shaped region aligned with object orientation.
@@ -589,8 +742,76 @@ class Poison:
 
         return poisoned_image
                     
-                    
-                    
+    def chunLiu_poisoning(self, img, patch, shape, percentage, masks, training=True):
+        device = img.device
+        img = img.to(device)
+        patch = patch.to(device)
+
+        mask_one = torch.zeros((3, img.shape[1], img.shape[2])).to(device)
+        mask_zero = torch.ones((3, img.shape[1], img.shape[2])).to(device)
+
+        for mask in masks:
+            lbl = label(mask)
+            regions = regionprops(lbl)
+            if random.random() < self.prob:
+                for region in regions:
+                    x0, y0 = region.centroid
+                    orientation = region.orientation
+                    bbox = region.bbox
+                    orientation = orientation - (np.pi / 2)
+
+                    sp = int(math.sqrt(percentage*(region.axis_major_length//2)*(region.axis_minor_length//2))) + 1
+
+                    # --- patch transform ---
+                    transform_type = random.choice(["rotate", "translate", "scale", "bright_shift", "none"])
+                    if training and transform_type == "rotate":
+                        angle = random.uniform(-30, 30)
+                        patch_t = self._apply_affine_torch(patch, angle_deg=angle)
+                    elif training and transform_type == "translate":
+                        max_dx = max(1, patch.shape[2] // 10)
+                        max_dy = max(1, patch.shape[1] // 10)
+                        tx = random.randint(-max_dx, max_dx)
+                        ty = random.randint(-max_dy, max_dy)
+                        patch_t = self._apply_affine_torch(patch, angle_deg=0.0, translate=(tx, ty))
+                    elif training and transform_type == "scale":
+                        scale = random.uniform(1., 2.5)
+                        patch_t = self._apply_affine_torch(patch, angle_deg=0.0, scale=scale)
+                    elif training and transform_type == "bright_shift":
+                        brightness_shift = random.uniform(-0.1, 0.1)
+                        contrast_scale = random.uniform(0.8, 1.2)
+                        patch_t = self._apply_affine_torch(patch,  brightness_shift=brightness_shift, contrast_scale=contrast_scale)
+                    else:
+                        patch_t = patch
+
+                    patch_t = F.interpolate(patch_t.unsqueeze(0), size=(sp, sp), mode='bilinear', align_corners=False).squeeze(0)
+
+                    temp = mask_one[:, int(x0) - sp//2:  int(x0) + sp//2, int(y0) - sp//2:int(y0) + sp//2]
+                    mask_one[:, int(x0) - sp//2:  int(x0) + sp//2, int(y0) - sp//2:int(y0) + sp//2] = patch_t[:, :int(temp.shape[1]), :int(temp.shape[2])]
+                    mask_zero[:, int(x0) - sp//2:  int(x0) + sp//2, int(y0) - sp//2:int(y0) + sp//2] = 0
+
+
+                    # --- Local Transform ---
+                    transform_type = random.choice(["blur", "rain", "bright_shift", "none"])
+                    object_mask_one = region.image
+                    object_mask_zero = ~region.image 
+                    if training and transform_type == "blur":
+                        kernel_size = random.choice([3, 5, 7])
+                        object_t = self._apply_weather_and_light_transform(img, blur_kernel_size=kernel_size)*object_mask_one
+                    elif training and transform_type == "rain":
+                        rain_strength = random.uniform(0.0, 0.4)
+                        object_t = self._apply_weather_and_light_transform(img, rain_strength=rain_strength)*object_mask_one
+                    elif training and transform_type == "bright_shift":
+                        brightness_shift = random.uniform(-0.1, 0.1)
+                        darkness_factor = random.uniform(0.4, 1)
+                        object_t = self._apply_affine_torch(img, brightness_shift=brightness_shift, darkness_factor=darkness_factor)*object_mask_one
+                    else:
+                        object_t = img*object_mask_one
+
+
+        poisoned_spot = object_t * mask_zero + mask_one
+        poisoned_image = img * object_mask_zero + poisoned_spot
+
+        return poisoned_image
 
 
 
