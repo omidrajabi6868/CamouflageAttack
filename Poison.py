@@ -12,7 +12,7 @@ from skimage.measure import label, regionprops
 class Poison:
     def __init__(self, prob):
         self.prob = prob
-    
+
     def _apply_affine_torch(self,
                             patch,
                             angle_deg=0.0,
@@ -118,9 +118,9 @@ class Poison:
         # Brightness shift
         out = out + brightness_shift
 
-        # Optional clamp if patch values are normalized to [0,1]
-        out = torch.clamp(out, 0.0, 1.0)
-
+        # Do not hard-clamp here: clamping inside the augmentation can saturate
+        # adversarial patch gradients. The caller/model input stage is
+        # responsible for any required value-range clipping.
         return out
     
     def _apply_weather_and_light_transform(
@@ -269,11 +269,13 @@ class Poison:
             out = out_b.squeeze(0)
 
         # ---------------------------------------------------------
-        # Final clamp
+        # Preserve gradient flow
         # ---------------------------------------------------------
 
-        out = torch.clamp(out, 0.0, 1.0)
-
+        # Avoid hard-clamping local appearance transforms here. A clamp would
+        # zero gradients for saturated pixels before they reach the optimized
+        # patch/image composition path; final input clipping happens outside
+        # this helper when needed.
         return out
 
     def google_poisoning(self, image, patch, percentage, masks, training=True):
@@ -747,8 +749,11 @@ class Poison:
         img = img.to(device)
         patch = patch.to(device)
 
-        mask_one = torch.zeros((3, img.shape[1], img.shape[2])).to(device)
-        mask_zero = torch.ones((3, img.shape[1], img.shape[2])).to(device)
+        channels, height, width = img.shape
+        mask_one = torch.zeros((channels, height, width), device=device, dtype=img.dtype)
+        mask_zero = torch.ones((channels, height, width), device=device, dtype=img.dtype)
+        object_mask = torch.zeros((channels, height, width), device=device, dtype=img.dtype)
+        object_image = img.clone()
 
         for mask in masks:
             lbl = label(mask)
@@ -792,24 +797,34 @@ class Poison:
 
                     # --- Local Transform ---
                     transform_type = random.choice(["blur", "rain", "bright_shift", "none"])
-                    object_mask_one = region.image
-                    object_mask_zero = ~region.image 
+                    min_row, min_col, max_row, max_col = bbox
+                    region_mask = torch.as_tensor(region.image, device=device, dtype=img.dtype)
+                    object_mask_one = torch.zeros((channels, height, width), device=device, dtype=img.dtype)
+                    object_mask_one[:, min_row:max_row, min_col:max_col] = region_mask.unsqueeze(0)
+                    object_mask = torch.maximum(object_mask, object_mask_one)
+
                     if training and transform_type == "blur":
                         kernel_size = random.choice([3, 5, 7])
-                        object_t = self._apply_weather_and_light_transform(img, blur_kernel_size=kernel_size)*object_mask_one
+                        transformed_object = self._apply_weather_and_light_transform(img, blur_kernel_size=kernel_size)
                     elif training and transform_type == "rain":
                         rain_strength = random.uniform(0.0, 0.4)
-                        object_t = self._apply_weather_and_light_transform(img, rain_strength=rain_strength)*object_mask_one
+                        transformed_object = self._apply_weather_and_light_transform(img, rain_strength=rain_strength)
                     elif training and transform_type == "bright_shift":
                         brightness_shift = random.uniform(-0.1, 0.1)
                         darkness_factor = random.uniform(0.4, 1)
-                        object_t = self._apply_affine_torch(img, brightness_shift=brightness_shift, darkness_factor=darkness_factor)*object_mask_one
+                        transformed_object = self._apply_weather_and_light_transform(
+                            img,
+                            brightness_shift=brightness_shift,
+                            darkness_factor=darkness_factor
+                        )
                     else:
-                        object_t = img*object_mask_one
+                        transformed_object = img
+
+                    object_image = object_image * (1 - object_mask_one) + transformed_object * object_mask_one
 
 
-        poisoned_spot = object_t * mask_zero + mask_one
-        poisoned_image = img * object_mask_zero + poisoned_spot
+        poisoned_spot = object_image * mask_zero + mask_one
+        poisoned_image = img * (1 - object_mask) + poisoned_spot * object_mask
 
         return poisoned_image
 
