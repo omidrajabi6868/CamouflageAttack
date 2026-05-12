@@ -196,18 +196,24 @@ class Poison:
         if rain_strength > 0.0:
 
             # Random sparse noise
-            rain_mask = torch.rand((1, H, W), device=device)
+            rain_mask = torch.rand((1, H, W), device=device, dtype=region.dtype)
 
             # Keep only sparse pixels
             threshold = 1.0 - rain_strength * 0.15
-            rain_mask = (rain_mask > threshold).float()
+            rain_mask = (rain_mask > threshold).to(dtype=region.dtype)
 
-            # Create vertical streak effect
+            # Create vertical streak effect. Keep the kernel length odd so
+            # symmetric padding preserves the input height exactly. For example,
+            # H=768 gives H//20=38; an even kernel with padding=19 produces
+            # height 769, which cannot be blended with the original image.
             streak_length = max(3, H // 20)
+            if streak_length % 2 == 0:
+                streak_length += 1
 
             kernel = torch.ones(
                 (1, 1, streak_length, 1),
-                device=device
+                device=device,
+                dtype=region.dtype
             )
 
             rain_mask = F.conv2d(
@@ -215,6 +221,7 @@ class Poison:
                 kernel,
                 padding=(streak_length // 2, 0)
             ).squeeze(0)
+            rain_mask = rain_mask[:, :H, :W]
 
             # Normalize rain
             rain_mask = rain_mask / (rain_mask.max() + 1e-8)
