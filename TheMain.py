@@ -29,7 +29,7 @@ def main(args):
     val_data_len = 0
     if dataset.name == 'airbus':
         train_df, valid_df = dataset.airbus_df()
-        DatasetCatalog.register('train_data', lambda: dataset.airbus_dicts(df=train_df[:20000], img_dir=img_dir))
+        DatasetCatalog.register('train_data', lambda: dataset.airbus_dicts(df=train_df[:100], img_dir=img_dir))
         if multiclass:
             coco_classes = MetadataCatalog.get('coco_2017_train').thing_classes.copy()
             coco_classes[8] = category_name
@@ -115,7 +115,7 @@ if __name__ == '__main__':
     parser.add_argument("--attack_name", type=str, default="shipCamou")
     parser.add_argument("--poisoning_func", type=str, default="shipCamou")
     parser.add_argument("--multiclass", type=bool, default=False)
-    parser.add_argument("--epoch_num", type=int, default=300)
+    parser.add_argument("--epoch_num", type=int, default=500)
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--learning_rate", type=float, default=1e-4)
     parser.add_argument("--category_id", type=int, default=0)

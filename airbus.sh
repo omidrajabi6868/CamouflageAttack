@@ -1,7 +1,7 @@
 #!/bin/bash
-#SBATCH --job-name=shipCamou
-#SBATCH --error=outputs/shipCamou.txt
-#SBATCH --output=outputs/shipCamou.txt
+#SBATCH --job-name=chunLiu
+#SBATCH --error=outputs/chunLiu.txt
+#SBATCH --output=outputs/chunLiu.txt
 #SBATCH --ntasks=4
 #SBATCH --cpus-per-task=4
 #SBATCH --partition=high-gpu-mem
@@ -13,7 +13,7 @@ enable_lmod
 module load container_env pytorch-gpu/2.2.0
 crun python TheMain.py \
     --dataset_name airbus \
-    --attack_name shipCamou \
+    --attack_name chunLiu \
     --batch_size 16 \
     --optimizer Adam \
     --learning_rate 1e-4 \
@@ -21,4 +21,4 @@ crun python TheMain.py \
     --model_path /home/oraja001/airbus_ship/AdversarialProject/trained_models/mask_rcnn_R_101_FPN_3x/model_final_ship.pth \
     --model_config COCO-InstanceSegmentation/mask_rcnn_R_101_FPN_3x.yaml \
     --attack_loss shipCamou \
-    --save_name shipCamou
+    --save_name chunLiu

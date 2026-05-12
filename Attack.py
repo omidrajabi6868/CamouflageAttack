@@ -53,7 +53,7 @@ class Attack:
         return adv_loss
     
     def shipCamou_loss(self, dict_losses, patch):
-        adv_bbox_loss = (-1)*(dict_losses['loss_box_reg']) 
+        adv_bbox_loss = (-1)*(dict_losses['loss_box_reg'])
         adv_objectness_loss = (-1)*(dict_losses['loss_cls'])
         loss_tv = TVLoss()(patch.unsqueeze(0)/57.3750)
         loss_nps= NPSLoss()(patch.unsqueeze(0)/57.3750)
@@ -217,7 +217,9 @@ class Attack:
         elif self.name == 'scaleAdaptive':
             patch_param = torch.randn(size=(3, 30, 30), device=self.device)
         elif self.name == 'shipCamou':
-            patch_param = torch.randn(size=(3, 64, 64), device=self.device)
+            patch_param = torch.randn(size=(3, 32, 32), device=self.device)
+        elif self.name == 'chunLiu':
+            patch_param = torch.randn(size=(3, 32, 32), device=self.device)
         elif self.name == 'shapeAware':
             patch_param = torch.randn(size=(3, 768, 768), device=self.device)
         else:
@@ -282,7 +284,9 @@ class Attack:
                 elif self.poisoning_func == "pieceWise":
                     adv_image = poison.pieceWise_poisoning(image.to(self.device), patch=patch, shape='ellipse', percentage=0.6, masks=binary_masks, training=True)
                 elif self.poisoning_func == "shipCamou":
-                    adv_image = poison.shipCamou_poisoning(image.to(self.device), patch=patch, shape=None, percentage=1.0, masks=binary_masks, training=True)
+                    adv_image = poison.shipCamou_poisoning(image.to(self.device), patch=patch, shape=None, percentage=.8, masks=binary_masks, training=True)
+                elif self.poisoning_func == "chunLiu":
+                    adv_image = poison.chunLiu_poisoning(image.to(self.device), patch=patch, shape=None, percentage=.8, masks=binary_masks, training=True)
                 else:
                     adv_image = None
 
