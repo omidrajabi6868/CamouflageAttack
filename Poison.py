@@ -285,6 +285,38 @@ class Poison:
         # this helper when needed.
         return out
 
+
+    def _randomly_expand_bbox(self, bbox, image_height, image_width, max_expand_ratio=0.25, training=True):
+        """
+        Return a clamped bounding-box window, optionally enlarged at random.
+
+        skimage regionprops returns bboxes as (min_row, min_col, max_row,
+        max_col), where max values are exclusive.  The ChunLiu local
+        appearance transform is intended to cover the full object bounding box
+        rather than only the instance-mask pixels; during training, this helper
+        randomly expands that window by up to ``max_expand_ratio`` of the bbox
+        size on each side to augment context around the object.
+        """
+        min_row, min_col, max_row, max_col = bbox
+
+        bbox_h = max(1, max_row - min_row)
+        bbox_w = max(1, max_col - min_col)
+
+        if training and max_expand_ratio > 0:
+            expand_ratio = random.uniform(0.0, max_expand_ratio)
+            expand_h = int(round(bbox_h * expand_ratio))
+            expand_w = int(round(bbox_w * expand_ratio))
+        else:
+            expand_h = 0
+            expand_w = 0
+
+        min_row = max(0, min_row - expand_h)
+        min_col = max(0, min_col - expand_w)
+        max_row = min(image_height, max_row + expand_h)
+        max_col = min(image_width, max_col + expand_w)
+
+        return min_row, min_col, max_row, max_col
+
     def google_poisoning(self, image, patch, percentage, masks, training=True):
         """
         Places adversarial patch inside an ellipse-shaped region aligned with object orientation.
@@ -803,30 +835,53 @@ class Poison:
 
 
                     # --- Local Transform ---
+                    # ChunLiu applies the appearance transform over the full
+                    # object bounding box, not just the binary instance-mask
+                    # pixels.  During training the box is randomly enlarged a
+                    # little so the transformed area can include context around
+                    # the object.
                     transform_type = random.choice(["blur", "rain", "bright_shift", "none"])
-                    min_row, min_col, max_row, max_col = bbox
-                    region_mask = torch.as_tensor(region.image, device=device, dtype=img.dtype)
+                    min_row, min_col, max_row, max_col = self._randomly_expand_bbox(
+                        bbox,
+                        image_height=height,
+                        image_width=width,
+                        training=training
+                    )
+
+                    if min_row >= max_row or min_col >= max_col:
+                        continue
+
                     object_mask_one = torch.zeros((channels, height, width), device=device, dtype=img.dtype)
-                    object_mask_one[:, min_row:max_row, min_col:max_col] = region_mask.unsqueeze(0)
+                    object_mask_one[:, min_row:max_row, min_col:max_col] = 1.0
                     object_mask = torch.maximum(object_mask, object_mask_one)
+
+                    object_region = img[:, min_row:max_row, min_col:max_col]
 
                     if training and transform_type == "blur":
                         kernel_size = random.choice([3, 5, 7])
-                        transformed_object = self._apply_weather_and_light_transform(img, blur_kernel_size=kernel_size)
+                        transformed_region = self._apply_weather_and_light_transform(
+                            object_region,
+                            blur_kernel_size=kernel_size
+                        )
                     elif training and transform_type == "rain":
                         rain_strength = random.uniform(0.0, 0.4)
-                        transformed_object = self._apply_weather_and_light_transform(img, rain_strength=rain_strength)
+                        transformed_region = self._apply_weather_and_light_transform(
+                            object_region,
+                            rain_strength=rain_strength
+                        )
                     elif training and transform_type == "bright_shift":
                         brightness_shift = random.uniform(-0.1, 0.1)
                         darkness_factor = random.uniform(0.4, 1)
-                        transformed_object = self._apply_weather_and_light_transform(
-                            img,
+                        transformed_region = self._apply_weather_and_light_transform(
+                            object_region,
                             brightness_shift=brightness_shift,
                             darkness_factor=darkness_factor
                         )
                     else:
-                        transformed_object = img
+                        transformed_region = object_region
 
+                    transformed_object = img.clone()
+                    transformed_object[:, min_row:max_row, min_col:max_col] = transformed_region
                     object_image = object_image * (1 - object_mask_one) + transformed_object * object_mask_one
 
 
