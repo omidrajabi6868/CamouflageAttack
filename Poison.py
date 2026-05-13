@@ -285,7 +285,6 @@ class Poison:
         # this helper when needed.
         return out
 
-
     def _randomly_expand_bbox(self, bbox, image_height, image_width, max_expand_ratio=0.25, training=True):
         """
         Return a clamped bounding-box window, optionally enlarged at random.
