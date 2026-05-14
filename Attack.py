@@ -2,6 +2,7 @@ import numpy as np
 import cv2
 import torch
 import random
+from torch.nn.parallel import parallel_apply, replicate
 
 from detectron2.structures import ImageList
 from detectron2.utils.events import EventStorage, get_event_storage
@@ -18,15 +19,30 @@ logger = logging.getLogger("detectron2")
 logger.setLevel(logging.DEBUG)  # or INFO, WARNING, etc.
 
 class Attack:
-    def __init__(self, name, poisoning_func, train_loader, val_loader, optimizer, epoch_num, attack_loss, save_name, mean, std):
+    def __init__(self, name, poisoning_func, train_loader, val_loader, optimizer, epoch_num, attack_loss, save_name, mean, std, device_ids=None):
         self.name = name
         self.poisoning_func = poisoning_func
         self.optimizer = optimizer
         self.epoch_num = epoch_num
         self.train_loader = train_loader
         self.val_loader = val_loader
-        self.rank = 0
-        self.device = torch.device(f'cuda:{self.rank}')
+        if torch.cuda.is_available():
+            available_device_ids = list(range(torch.cuda.device_count()))
+            if device_ids is None:
+                self.device_ids = available_device_ids
+            else:
+                requested_device_ids = [int(device_id) for device_id in device_ids]
+                self.device_ids = [device_id for device_id in requested_device_ids if device_id in available_device_ids]
+                if not self.device_ids:
+                    raise ValueError(f"None of the requested CUDA devices are available: {requested_device_ids}")
+            self.device_ids = sorted(dict.fromkeys(self.device_ids))
+            self.rank = self.device_ids[0]
+            self.device = torch.device(f'cuda:{self.rank}')
+        else:
+            self.device_ids = []
+            self.rank = 0
+            self.device = torch.device('cpu')
+        self.multi_gpu = len(self.device_ids) > 1
         self.mean = mean.to(self.device)
         self.std = std.to(self.device)
         self.attack_loss = attack_loss
@@ -35,6 +51,95 @@ class Attack:
         # GradNorm is memory intensive because it relies on higher-order gradients.
         # Update GradNorm weights less frequently to reduce peak memory pressure.
         self.gradnorm_update_interval = 2
+
+    def _active_device_ids(self, batch_len=None):
+        if not self.device_ids:
+            return []
+        if batch_len is None:
+            return self.device_ids
+        return self.device_ids[:max(1, min(len(self.device_ids), batch_len))]
+
+    def _split_batch_for_devices(self, batch_inputs):
+        devices = self._active_device_ids(len(batch_inputs))
+        if len(devices) <= 1:
+            return [(self.device, batch_inputs)]
+
+        chunks = []
+        per_device = int(np.ceil(len(batch_inputs) / len(devices)))
+        for chunk_index, device_id in enumerate(devices):
+            start = chunk_index * per_device
+            end = min(start + per_device, len(batch_inputs))
+            if start < end:
+                chunks.append((torch.device(f'cuda:{device_id}'), batch_inputs[start:end]))
+        return chunks
+
+    def _device_index_from_input(self, input_value):
+        if isinstance(input_value, torch.Tensor):
+            return input_value.device.index
+        if isinstance(input_value, list) and input_value:
+            return input_value[0]['image'].device.index
+        return self.rank
+
+    def _parallel_apply_module(self, module, inputs_by_device):
+        if len(inputs_by_device) == 1:
+            return [module(*inputs_by_device[0])]
+
+        used_device_ids = [self._device_index_from_input(inputs[0]) for inputs in inputs_by_device]
+        replicas = replicate(module, used_device_ids)
+        return parallel_apply(replicas, inputs_by_device, devices=used_device_ids)
+
+    def _model_forward(self, model, adversarial_chunks):
+        nonempty_chunks = [chunk for _, chunk in adversarial_chunks if len(chunk) > 0]
+        inputs_by_device = [(chunk,) for chunk in nonempty_chunks]
+        outputs = self._parallel_apply_module(model, inputs_by_device)
+        if isinstance(outputs[0], dict):
+            return self._reduce_loss_dict(outputs, [len(chunk) for chunk in nonempty_chunks])
+        return outputs[0]
+
+    def _reduce_loss_dict(self, loss_dicts, weights):
+        reduced = {}
+        total_weight = sum(weights)
+        for key in loss_dicts[0].keys():
+            values = []
+            for loss_dict, weight in zip(loss_dicts, weights):
+                value = loss_dict[key]
+                if value.ndim > 0:
+                    value = value.mean()
+                values.append(value.to(self.device) * (weight / total_weight))
+            reduced[key] = sum(values)
+        return reduced
+
+    def _weighted_mean(self, weighted_values):
+        if not weighted_values:
+            return torch.zeros((), device=self.device)
+        total_weight = sum(weight for _, weight in weighted_values)
+        return sum(value.to(self.device) * (weight / total_weight) for value, weight in weighted_values)
+
+    def _backbone_features_by_device(self, backbone, image_tensors):
+        inputs_by_device = [(images,) for images in image_tensors]
+        return self._parallel_apply_module(backbone, inputs_by_device)
+
+    def _seg_outputs_by_device(self, seg_model, image_tensors):
+        inputs_by_device = [(images,) for images in image_tensors]
+        return self._parallel_apply_module(seg_model, inputs_by_device)
+
+    def _feature_loss_from_chunks(self, clean_feature_chunks, adv_feature_chunks, weights):
+        losses = []
+        for clean_features, adv_features, weight in zip(clean_feature_chunks, adv_feature_chunks, weights):
+            common_keys = [key for key in ['p2', 'p3', 'p4', 'p5', 'p6'] if key in clean_features and key in adv_features]
+            if not common_keys:
+                continue
+            feature_loss = torch.zeros((), device=next(iter(adv_features.values())).device)
+            for key in common_keys:
+                feature_loss = feature_loss + torch.nn.MSELoss()(clean_features[key], adv_features[key])
+            losses.append((feature_loss, weight))
+        return self._weighted_mean(losses)
+
+    def _seg_loss_from_chunks(self, seg_output_chunks, target_mask_chunks, weights):
+        losses = []
+        for seg_outputs, target_masks, weight in zip(seg_output_chunks, target_mask_chunks, weights):
+            losses.append((self.segmentation_loss(seg_outputs, target_masks), weight))
+        return self._weighted_mean(losses)
 
     def go_loss(self, dict_losses):
         adv_loss = dict_losses['loss_cls']*(-1)
@@ -66,10 +171,13 @@ class Attack:
         
         return adv_loss
 
-    def _compute_attack_terms(self, dict_losses, clean_features, adv_features, seg_outputs, target_masks):
-        feature_loss = torch.nn.MSELoss()(clean_features['p2'], adv_features['p2'])
-        for key in ['p3', 'p4', 'p5', 'p6']:
-            feature_loss += torch.nn.MSELoss()(clean_features[key], adv_features[key])
+    def _compute_attack_terms(self, dict_losses, clean_features=None, adv_features=None, seg_outputs=None, target_masks=None, feature_loss=None, seg_loss=None):
+        if feature_loss is None:
+            feature_loss = torch.nn.MSELoss()(clean_features['p2'], adv_features['p2'])
+            for key in ['p3', 'p4', 'p5', 'p6']:
+                feature_loss += torch.nn.MSELoss()(clean_features[key], adv_features[key])
+        if seg_loss is None:
+            seg_loss = self.segmentation_loss(seg_outputs, target_masks)
         return {
             "rpn_cls": dict_losses['loss_rpn_cls'],
             "rpn_loc": dict_losses['loss_rpn_loc'],
@@ -77,16 +185,16 @@ class Attack:
             "roi_loc": torch.log1p(1 + (1/(dict_losses['loss_box_reg'] + 1e-6))),
             "mask": torch.log1p(1 + (1/(dict_losses['loss_mask'] + 1e-6))),
             "feature": torch.log1p(1 + (1/(feature_loss + 1e-6))),
-            "seg": self.segmentation_loss(seg_outputs, target_masks),
+            "seg": seg_loss,
         }
 
-    def equally_weighted_loss(self, dict_losses, clean_features, adv_features, seg_outputs=None, target_masks=None):
-        terms = self._compute_attack_terms(dict_losses, clean_features, adv_features, seg_outputs, target_masks)
+    def equally_weighted_loss(self, dict_losses, clean_features=None, adv_features=None, seg_outputs=None, target_masks=None, feature_loss=None, seg_loss=None):
+        terms = self._compute_attack_terms(dict_losses, clean_features, adv_features, seg_outputs, target_masks, feature_loss, seg_loss)
         adv_loss = sum(terms.values())
         return adv_loss
 
-    def fixed_weighted_loss(self, dict_losses, clean_features, adv_features, lambdas, seg_outputs=None, target_masks=None):
-        terms = self._compute_attack_terms(dict_losses, clean_features, adv_features, seg_outputs, target_masks)
+    def fixed_weighted_loss(self, dict_losses, clean_features=None, adv_features=None, lambdas=None, seg_outputs=None, target_masks=None, feature_loss=None, seg_loss=None):
+        terms = self._compute_attack_terms(dict_losses, clean_features, adv_features, seg_outputs, target_masks, feature_loss, seg_loss)
         adv_loss = sum(terms[k] * lambdas[k] for k in terms.keys())
         return adv_loss
     
@@ -131,10 +239,10 @@ class Attack:
         weights = self.get_loss_weights(epoch)
         return random.choices(list(weights.keys()), weights=list(weights.values()), k=1)[0]
 
-    def random_sampling_loss(self, epoch, dict_losses, clean_features, adv_features, seg_outputs=None, target_masks=None):
+    def random_sampling_loss(self, epoch, dict_losses, clean_features=None, adv_features=None, seg_outputs=None, target_masks=None, feature_loss=None, seg_loss=None):
 
         selected_loss = self.sample_loss_type(epoch)
-        terms = self._compute_attack_terms(dict_losses, clean_features, adv_features, seg_outputs, target_masks)
+        terms = self._compute_attack_terms(dict_losses, clean_features, adv_features, seg_outputs, target_masks, feature_loss, seg_loss)
         choice_to_term = {
             "rpn_cls": "rpn_cls",
             "roi_cls": "roi_cls",
@@ -184,8 +292,8 @@ class Attack:
         # L1 penalty  Σ |gᵢ – ĝᵢ|
         return torch.nn.functional.l1_loss(g_norm, target, reduction='sum')
 
-    def grad_norm_loss(self, epoch, patch_param, L0, dict_losses, loss_weights, clean_features, adv_features, seg_outputs=None, target_masks=None, alpha=1.5, training=True, compute_gpen=True):
-        terms = self._compute_attack_terms(dict_losses, clean_features, adv_features, seg_outputs, target_masks)
+    def grad_norm_loss(self, epoch, patch_param, L0, dict_losses, loss_weights, clean_features=None, adv_features=None, seg_outputs=None, target_masks=None, alpha=1.5, training=True, compute_gpen=True, feature_loss=None, seg_loss=None):
+        terms = self._compute_attack_terms(dict_losses, clean_features, adv_features, seg_outputs, target_masks, feature_loss, seg_loss)
         task_losses = torch.stack([
             terms["rpn_cls"],
             terms["rpn_loc"],
@@ -209,6 +317,12 @@ class Attack:
             return (loss_weights.detach() * task_losses).sum()
 
     def conduct_attack(self, victim_model, detection_net=None):
+
+        victim_model = victim_model.to(self.device)
+        for parameter in victim_model.parameters():
+            parameter.requires_grad_(False)
+        if self.multi_gpu:
+            logger.info(f"Using manual multi-GPU attack execution on CUDA devices: {self.device_ids}")
 
         if self.name == 'shapeShifter' or self.name == 'google':
             patch_param = torch.randn(size=(3, 128, 128), device=self.device)
@@ -234,9 +348,15 @@ class Attack:
             parameter_render = UNet().to(self.device)
             params_to_optimize = list(parameter_render.parameters()) + [patch_param]
             parameters_count += sum(p.numel() for p in parameter_render.parameters())
-            seg_model = detection_net.segmentation_model(MODEL_SEG='UNET_RESNET34ImgNet').to(self.device).eval()
         else:
             params_to_optimize = [patch_param]
+
+        if self.attack_loss in ['equally_weighted', 'fixed_weighted', 'random_sampling', 'grad_norm', 'rl_optimization']:
+            if detection_net is None:
+                raise ValueError("detection_net is required for attack losses that use segmentation terms")
+            seg_model = detection_net.segmentation_model(MODEL_SEG='UNET_RESNET34ImgNet').to(self.device).eval()
+            for parameter in seg_model.parameters():
+                parameter.requires_grad_(False)
 
         if self.attack_loss == 'grad_norm':
             # --- 1‑D learnable weights w_i, initialised to 1 ---------------------
@@ -258,8 +378,10 @@ class Attack:
         
         best_loss = np.inf
 
-        def make_adversarial_examples(examples, patch):
-            patch = torch.tanh(patch)*103
+        def make_adversarial_examples(examples, patch, device=None):
+            device = self.device if device is None else device
+            patch = (torch.tanh(patch)*103).to(device)
+            mean = self.mean.to(device)
             adversarial_data = []
             for inp in examples:
                 adversarial_example = inp.copy()
@@ -272,25 +394,25 @@ class Attack:
                     binary_mask = cv2.fillPoly(binary_mask, [np.array(polygon, dtype=np.int32)], 1)
                     binary_masks.append(binary_mask)
                 
-                image = (inp['image'].to(self.device) - self.mean[0])
+                image = (inp['image'].to(device) - mean[0])
                 if self.poisoning_func == 'Dpatch':
-                    adv_image = poison.dpatch_poisoning(image.to(self.device), patch=patch, masks=binary_masks, training=True)
+                    adv_image = poison.dpatch_poisoning(image.to(device), patch=patch, masks=binary_masks, training=True)
                 elif self.poisoning_func in ['google', 'shapeShifter']:
-                    adv_image = poison.google_poisoning(image.to(self.device), patch=patch, percentage=random.uniform(.2, .6), masks=binary_masks, training=True)
+                    adv_image = poison.google_poisoning(image.to(device), patch=patch, percentage=random.uniform(.2, .6), masks=binary_masks, training=True)
                 elif self.poisoning_func == 'scaleAdaptive':
-                    adv_image = poison.scaleAdaptive_poisoning(image.to(self.device), patch=patch, alpha=2.1, masks=binary_masks, training=True)
+                    adv_image = poison.scaleAdaptive_poisoning(image.to(device), patch=patch, alpha=2.1, masks=binary_masks, training=True)
                 elif self.poisoning_func == 'shapeAware':
-                    adv_image = poison.shapeAware_poisoning(image.to(self.device), patch=patch, shape='ellipse', percentage=random.uniform(.2, .7), masks=binary_masks, training=True)
+                    adv_image = poison.shapeAware_poisoning(image.to(device), patch=patch, shape='ellipse', percentage=random.uniform(.2, .7), masks=binary_masks, training=True)
                 elif self.poisoning_func == "pieceWise":
-                    adv_image = poison.pieceWise_poisoning(image.to(self.device), patch=patch, shape='ellipse', percentage=0.6, masks=binary_masks, training=True)
+                    adv_image = poison.pieceWise_poisoning(image.to(device), patch=patch, shape='ellipse', percentage=0.6, masks=binary_masks, training=True)
                 elif self.poisoning_func == "shipCamou":
-                    adv_image = poison.shipCamou_poisoning(image.to(self.device), patch=patch, shape=None, percentage=1., masks=binary_masks, training=True)
+                    adv_image = poison.shipCamou_poisoning(image.to(device), patch=patch, shape=None, percentage=1., masks=binary_masks, training=True)
                 elif self.poisoning_func == "chunLiu":
-                    adv_image = poison.chunLiu_poisoning(image.to(self.device), patch=patch, shape=None, percentage=1., masks=binary_masks, training=True)
+                    adv_image = poison.chunLiu_poisoning(image.to(device), patch=patch, shape=None, percentage=1., masks=binary_masks, training=True)
                 else:
                     adv_image = None
 
-                adversarial_example['image'] = (adv_image.to(self.device) + self.mean[0].to(self.device)).clamp(0, 255).requires_grad_(True)
+                adversarial_example['image'] = (adv_image.to(device) + mean[0]).clamp(0, 255).requires_grad_(True)
                 adversarial_example['height'] = adv_image.shape[1]
                 adversarial_example['width'] = adv_image.shape[2]
                 
@@ -334,11 +456,13 @@ class Attack:
                         patch = parameter_render(patch_param.unsqueeze(0)).squeeze()
                     else:
                         patch = patch_param*1
-                    adversarial_data, patch = make_adversarial_examples(batch_inputs, patch)
+                    batch_chunks = self._split_batch_for_devices(batch_inputs)
+                    adversarial_chunks = [(device, make_adversarial_examples(chunk, patch, device=device)[0]) for device, chunk in batch_chunks]
+                    adversarial_data = [item for _, chunk in adversarial_chunks for item in chunk]
                     if len(adversarial_data) == 0:
                         continue
 
-                    dict_losses = victim_model(adversarial_data)
+                    dict_losses = self._model_forward(victim_model, adversarial_chunks)
 
 
                     if self.attack_loss == 'go':
@@ -352,33 +476,42 @@ class Attack:
                     elif self.attack_loss == 'shipCamou':
                         loss = self.shipCamou_loss(dict_losses, patch)
                     elif self.attack_loss in ['equally_weighted', 'fixed_weighted', 'random_sampling', 'grad_norm', 'rl_optimization']:
-                        target_masks = torch.tensor(
-                            [polygons_to_binary_mask(d['instances'].gt_masks.polygons, d['image'].shape[1], d['image'].shape[2]) for d in batch_inputs]
-                        ).unsqueeze(1).to(self.device)
+                        chunk_weights = [len(chunk) for _, chunk in adversarial_chunks]
+                        target_mask_chunks = [
+                            torch.tensor(
+                                [polygons_to_binary_mask(d['instances'].gt_masks.polygons, d['image'].shape[1], d['image'].shape[2]) for d in clean_chunk]
+                            ).unsqueeze(1).to(device)
+                            for device, clean_chunk in batch_chunks
+                        ]
 
-                        adversarial_images = [adv_d['image'].requires_grad_(True) for adv_d in adversarial_data]
-                        gt_instances = [x['instances'].to(self.device) for x in adversarial_data]
-                        adv_inputs_for_detection = ImageList.from_tensors(adversarial_images)
-                        clean_images = [clean_d['image'].float() for clean_d in batch_inputs]
-                        del adversarial_data, batch_inputs
+                        adv_image_tensors = [
+                            (torch.stack([adv_d['image'].requires_grad_(True) for adv_d in adv_chunk]).to(device) - self.mean.to(device)).requires_grad_(True)
+                            for device, adv_chunk in adversarial_chunks
+                        ]
+                        clean_image_tensors = [
+                            torch.stack([clean_d['image'].float() for clean_d in clean_chunk]).to(device) - self.mean.to(device)
+                            for device, clean_chunk in batch_chunks
+                        ]
 
-                        adversarial_images = ((torch.stack(adversarial_images).to(self.device) - self.mean)).requires_grad_(True)
-                        adv_features = victim_model.backbone(adversarial_images)
-                        adversarial_images = adversarial_images/self.std
-                        seg_outputs = seg_model(adversarial_images)
-                        del adversarial_images
+                        adv_features_chunks = self._backbone_features_by_device(victim_model.backbone, adv_image_tensors)
+                        seg_input_tensors = [images / self.std.to(images.device) for images in adv_image_tensors]
+                        seg_outputs_chunks = self._seg_outputs_by_device(seg_model, seg_input_tensors)
+                        clean_features_chunks = self._backbone_features_by_device(victim_model.backbone, clean_image_tensors)
+                        feature_loss = self._feature_loss_from_chunks(clean_features_chunks, adv_features_chunks, chunk_weights)
+                        seg_loss = self._seg_loss_from_chunks(seg_outputs_chunks, target_mask_chunks, chunk_weights)
 
-                        clean_images = (torch.stack(clean_images).to(self.device) - self.mean)
-                        clean_features = victim_model.backbone(clean_images)
-                        del clean_images
+                        adv_inputs_for_detection = ImageList.from_tensors([adv_d['image'].requires_grad_(True) for adv_d in adversarial_chunks[0][1]])
+                        gt_instances = [x['instances'].to(self.device) for x in adversarial_chunks[0][1]]
+                        adv_features = adv_features_chunks[0]
+                        del adversarial_data, batch_inputs, adv_image_tensors, clean_image_tensors, seg_input_tensors
                         if self.attack_loss == 'equally_weighted':
-                            loss = self.equally_weighted_loss(dict_losses, clean_features, adv_features, seg_outputs, target_masks)
+                            loss = self.equally_weighted_loss(dict_losses, feature_loss=feature_loss, seg_loss=seg_loss)
                         elif self.attack_loss == "fixed_weighted":
-                            loss = self.fixed_weighted_loss(dict_losses, clean_features, adv_features, lambdas=lambdas, seg_outputs=seg_outputs, target_masks=target_masks)
-                            del seg_outputs, adv_features, clean_features, target_masks
+                            loss = self.fixed_weighted_loss(dict_losses, lambdas=lambdas, feature_loss=feature_loss, seg_loss=seg_loss)
+                            del adv_features_chunks, clean_features_chunks, target_mask_chunks, seg_outputs_chunks
                         elif self.attack_loss == "random_sampling":
-                            loss, sampled_loss_name = self.random_sampling_loss(epoch, dict_losses, clean_features, adv_features, seg_outputs, target_masks)
-                            del seg_outputs, adv_features, clean_features, target_masks
+                            loss, sampled_loss_name = self.random_sampling_loss(epoch, dict_losses, feature_loss=feature_loss, seg_loss=seg_loss)
+                            del adv_features_chunks, clean_features_chunks, target_mask_chunks, seg_outputs_chunks
                         elif self.attack_loss == "grad_norm":
                             should_update_gradnorm = (iteration % self.gradnorm_update_interval == 0)
                             patch_loss, gradnorm_loss = self.grad_norm_loss(
@@ -387,16 +520,14 @@ class Attack:
                                 L0,
                                 dict_losses,
                                 loss_weights,
-                                clean_features,
-                                adv_features,
-                                seg_outputs,
-                                target_masks,
                                 alpha=1.5,
                                 training=True,
-                                compute_gpen=should_update_gradnorm
+                                compute_gpen=should_update_gradnorm,
+                                feature_loss=feature_loss,
+                                seg_loss=seg_loss
                             )
                             loss = patch_loss
-                            del seg_outputs, adv_features, clean_features, target_masks
+                            del adv_features_chunks, clean_features_chunks, target_mask_chunks, seg_outputs_chunks
                         elif self.attack_loss == "rl_optimization":
                             if epoch%2==0:
                                 if iteration == 0:
@@ -415,7 +546,7 @@ class Attack:
                                 lambdas["feature"] = float((1 * ppo.action_values[actions["feature"]]).item())
                                 lambdas["seg"] = float((0.1 * ppo.action_values[actions["seg"]]).item())
                                 lambdas["mask"] = float((1 * ppo.action_values[actions["mask"]]).item())
-                            loss = self.fixed_weighted_loss(dict_losses, clean_features, adv_features, lambdas=lambdas, seg_outputs=seg_outputs, target_masks=target_masks)
+                            loss = self.fixed_weighted_loss(dict_losses, lambdas=lambdas, feature_loss=feature_loss, seg_loss=seg_loss)
                         else:
                             loss = None
                     else:
@@ -485,11 +616,13 @@ class Attack:
                                 patch = parameter_render(patch_param.unsqueeze(0)).squeeze()
                             else:
                                 patch = patch_param*1
-                            adversarial_data, patch = make_adversarial_examples(batch_inputs, patch)
+                            batch_chunks = self._split_batch_for_devices(batch_inputs)
+                            adversarial_chunks = [(device, make_adversarial_examples(chunk, patch, device=device)[0]) for device, chunk in batch_chunks]
+                            adversarial_data = [item for _, chunk in adversarial_chunks for item in chunk]
                             if len(adversarial_data) == 0:
                                 continue
 
-                            dict_losses = victim_model(adversarial_data)
+                            dict_losses = self._model_forward(victim_model, adversarial_chunks)
                             if self.attack_loss == 'go':
                                 loss = self.go_loss(dict_losses)
                             elif self.attack_loss == 'ss':
@@ -501,36 +634,43 @@ class Attack:
                             elif self.attack_loss == 'shipCamou':
                                 loss = self.shipCamou_loss(dict_losses, patch)
                             elif self.attack_loss in ['equally_weighted', 'fixed_weighted', 'random_sampling', 'grad_norm', 'rl_optimization']:
-                                target_masks = torch.tensor(
-                                    [polygons_to_binary_mask(d['instances'].gt_masks.polygons, d['image'].shape[1], d['image'].shape[2]) for d in batch_inputs]
-                                ).unsqueeze(1).to(self.device)
+                                chunk_weights = [len(chunk) for _, chunk in adversarial_chunks]
+                                target_mask_chunks = [
+                                    torch.tensor(
+                                        [polygons_to_binary_mask(d['instances'].gt_masks.polygons, d['image'].shape[1], d['image'].shape[2]) for d in clean_chunk]
+                                    ).unsqueeze(1).to(device)
+                                    for device, clean_chunk in batch_chunks
+                                ]
 
-                                adversarial_images = [adv_d['image'] for adv_d in adversarial_data]
-                                clean_images = [clean_d['image'].float() for clean_d in batch_inputs]
-                                del adversarial_data, batch_inputs
+                                adv_image_tensors = [
+                                    (torch.stack([adv_d['image'] for adv_d in adv_chunk]).to(device) - self.mean.to(device)).requires_grad_(True)
+                                    for device, adv_chunk in adversarial_chunks
+                                ]
+                                clean_image_tensors = [
+                                    torch.stack([clean_d['image'].float() for clean_d in clean_chunk]).to(device) - self.mean.to(device)
+                                    for device, clean_chunk in batch_chunks
+                                ]
 
-                                adversarial_images = ((torch.stack(adversarial_images).to(self.device) - self.mean)).requires_grad_(True)
-                                adv_features = victim_model.backbone(adversarial_images)
-                                adversarial_images = adversarial_images/self.std
-                                seg_outputs = seg_model(adversarial_images)
-                                del adversarial_images
-
-                                clean_images = (torch.stack(clean_images).to(self.device) - self.mean)
-                                clean_features = victim_model.backbone(clean_images)
-                                del clean_images
+                                adv_features_chunks = self._backbone_features_by_device(victim_model.backbone, adv_image_tensors)
+                                seg_input_tensors = [images / self.std.to(images.device) for images in adv_image_tensors]
+                                seg_outputs_chunks = self._seg_outputs_by_device(seg_model, seg_input_tensors)
+                                clean_features_chunks = self._backbone_features_by_device(victim_model.backbone, clean_image_tensors)
+                                feature_loss = self._feature_loss_from_chunks(clean_features_chunks, adv_features_chunks, chunk_weights)
+                                seg_loss = self._seg_loss_from_chunks(seg_outputs_chunks, target_mask_chunks, chunk_weights)
+                                del adversarial_data, batch_inputs, adv_image_tensors, clean_image_tensors, seg_input_tensors
                                 if self.attack_loss == 'equally_weighted':
-                                    loss = self.equally_weighted_loss(dict_losses, clean_features, adv_features, seg_outputs, target_masks)
+                                    loss = self.equally_weighted_loss(dict_losses, feature_loss=feature_loss, seg_loss=seg_loss)
                                 elif self.attack_loss == "fixed_weighted":
-                                    loss = self.fixed_weighted_loss(dict_losses, clean_features, adv_features, lambdas=lambdas, seg_outputs=seg_outputs, target_masks=target_masks)
-                                    del seg_outputs, adv_features, clean_features, target_masks
+                                    loss = self.fixed_weighted_loss(dict_losses, lambdas=lambdas, feature_loss=feature_loss, seg_loss=seg_loss)
+                                    del adv_features_chunks, clean_features_chunks, target_mask_chunks, seg_outputs_chunks
                                 elif self.attack_loss == "random_sampling":
-                                    loss, _ = self.random_sampling_loss(epoch, dict_losses, clean_features, adv_features, seg_outputs, target_masks)
-                                    del seg_outputs, adv_features, clean_features, target_masks
+                                    loss, _ = self.random_sampling_loss(epoch, dict_losses, feature_loss=feature_loss, seg_loss=seg_loss)
+                                    del adv_features_chunks, clean_features_chunks, target_mask_chunks, seg_outputs_chunks
                                 elif self.attack_loss == "grad_norm":
-                                    loss = self.grad_norm_loss(epoch, [patch_param], L0, dict_losses, loss_weights, clean_features, adv_features, seg_outputs, target_masks, alpha=1.5, training=False)
-                                    del seg_outputs, adv_features, clean_features, target_masks
+                                    loss = self.grad_norm_loss(epoch, [patch_param], L0, dict_losses, loss_weights, alpha=1.5, training=False, feature_loss=feature_loss, seg_loss=seg_loss)
+                                    del adv_features_chunks, clean_features_chunks, target_mask_chunks, seg_outputs_chunks
                                 elif self.attack_loss == "rl_optimization":
-                                    loss = self.fixed_weighted_loss(dict_losses, clean_features, adv_features, lambdas=lambdas, seg_outputs=seg_outputs, target_masks=target_masks)
+                                    loss = self.fixed_weighted_loss(dict_losses, lambdas=lambdas, feature_loss=feature_loss, seg_loss=seg_loss)
                             else:
                                 loss = None
 
