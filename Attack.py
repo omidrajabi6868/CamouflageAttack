@@ -29,7 +29,7 @@ class Attack:
         if torch.cuda.is_available():
             available_device_ids = list(range(torch.cuda.device_count()))
             if device_ids is None:
-                self.device_ids = available_device_ids[:1]
+                self.device_ids = available_device_ids
             else:
                 requested_device_ids = [int(device_id) for device_id in device_ids]
                 self.device_ids = [device_id for device_id in requested_device_ids if device_id in available_device_ids]

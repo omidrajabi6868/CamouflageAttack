@@ -133,7 +133,7 @@ if __name__ == '__main__':
     parser.add_argument("--save_name", type=str, default='shipCamou')
     parser.add_argument("--optimizer", type=str, default='Adam')
     parser.add_argument("--device_ids", type=int, nargs="+", default=None,
-                        help="CUDA device ids to split each attack batch across, e.g. --device_ids 0 1 2 3. Defaults to cuda:0 only.")
+                        help="CUDA device ids to split each attack batch across, e.g. --device_ids 0 1 2 3. Defaults to all available CUDA devices.")
 
 
     args = parser.parse_args()
