@@ -103,7 +103,8 @@ def main(args):
                     epoch_num=epoch_num,
                     attack_loss=attack_loss,
                     save_name=save_name,
-                    mean=mean, std=std)
+                    mean=mean, std=std,
+                    device_ids=args.device_ids)
 
     trained_patch = attack.conduct_attack(detection_model, detection_network)
 
@@ -131,6 +132,8 @@ if __name__ == '__main__':
     parser.add_argument("--attack_loss", type=str, default='shipCamou')
     parser.add_argument("--save_name", type=str, default='shipCamou')
     parser.add_argument("--optimizer", type=str, default='Adam')
+    parser.add_argument("--device_ids", type=int, nargs="+", default=None,
+                        help="CUDA device ids to split each attack batch across, e.g. --device_ids 0 1 2 3. Defaults to cuda:0 only.")
 
 
     args = parser.parse_args()
