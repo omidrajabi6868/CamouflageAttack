@@ -1,8 +1,9 @@
 import numpy as np
 import cv2
+import copy
 import torch
 import random
-from torch.nn.parallel import parallel_apply, replicate
+from torch.nn.parallel import parallel_apply
 
 from detectron2.structures import ImageList
 from detectron2.utils.events import EventStorage, get_event_storage
@@ -51,6 +52,11 @@ class Attack:
         # GradNorm is memory intensive because it relies on higher-order gradients.
         # Update GradNorm weights less frequently to reduce peak memory pressure.
         self.gradnorm_update_interval = 2
+        # ``torch.nn.parallel.replicate`` can leave frozen Detectron2 parameters
+        # on the source GPU (the victim's parameters are frozen below).  Keep
+        # explicit per-device copies instead so every replica's parameters and
+        # buffers are guaranteed to match the device receiving its inputs.
+        self._module_replica_cache = {}
 
     def _active_device_ids(self, batch_len=None):
         if not self.device_ids:
@@ -85,7 +91,15 @@ class Attack:
             return [module(*inputs_by_device[0])]
 
         used_device_ids = [self._device_index_from_input(inputs[0]) for inputs in inputs_by_device]
-        replicas = replicate(module, used_device_ids)
+        replicas = [module]
+        for device_id in used_device_ids[1:]:
+            cache_key = (id(module), device_id)
+            replica = self._module_replica_cache.get(cache_key)
+            if replica is None:
+                replica = copy.deepcopy(module).to(torch.device(f'cuda:{device_id}'))
+                self._module_replica_cache[cache_key] = replica
+            replica.train(module.training)
+            replicas.append(replica)
         return parallel_apply(replicas, inputs_by_device, devices=used_device_ids)
 
     def _model_forward(self, model, adversarial_chunks):
@@ -318,6 +332,7 @@ class Attack:
 
     def conduct_attack(self, victim_model, detection_net=None):
 
+        self._module_replica_cache.clear()
         victim_model = victim_model.to(self.device)
         for parameter in victim_model.parameters():
             parameter.requires_grad_(False)
