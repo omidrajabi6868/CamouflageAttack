@@ -29,7 +29,7 @@ def main(args):
     val_data_len = 0
     if dataset.name == 'airbus':
         train_df, valid_df = dataset.airbus_df()
-        DatasetCatalog.register('train_data', lambda: dataset.airbus_dicts(df=train_df[:100], img_dir=img_dir))
+        DatasetCatalog.register('train_data', lambda: dataset.airbus_dicts(df=train_df[:1000], img_dir=img_dir))
         if multiclass:
             coco_classes = MetadataCatalog.get('coco_2017_train').thing_classes.copy()
             coco_classes[8] = category_name
@@ -40,7 +40,7 @@ def main(args):
         train_data_len = len(DatasetCatalog.get('train_data'))
         train_metadata = MetadataCatalog.get("train_data")
 
-        DatasetCatalog.register('val_data', lambda: dataset.airbus_dicts(df=valid_df[:], img_dir=img_dir))
+        DatasetCatalog.register('val_data', lambda: dataset.airbus_dicts(df=valid_df[:1000], img_dir=img_dir))
         if multiclass:
             MetadataCatalog.get('val_data').set(thing_classes=coco_classes)
         else:

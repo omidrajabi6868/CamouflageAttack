@@ -51,6 +51,8 @@ class CustomPoisonMapperCNN(DatasetMapper):
             adv_img = self.poison.pieceWise_poisoning(image, patch=self.patch, shape='ellipse', percentage=self.percentage, masks=binary_masks, training=False)
         elif self.poisoning_func == "shipCamou":
             adv_img = self.poison.shipCamou_poisoning(image, patch=self.patch, shape=None, percentage=self.percentage, masks=binary_masks, training=False)
+        elif self.poisoning_func == "chunLiu":
+            adv_img = self.poison.chunLiu_poisoning(image, patch=self.patch, shape=None, percentage=self.percentage, masks=binary_masks, training=False)
         else:
             adv_img = image
 
@@ -105,6 +107,8 @@ class CustomPoisonMapperTransformer:
             adv_img = self.poison.pieceWise_poisoning(image, patch=self.patch, shape='ellipse', percentage=self.percentage, masks=binary_masks, training=False)
         elif self.poisoning_func == "shipCamou":
             adv_img = self.poison.shipCamou_poisoning(image, patch=self.patch, shape=None, percentage=self.percentage, masks=binary_masks, training=False)
+        elif self.poisoning_func == "chunLiu":
+            adv_img = self.poison.chunLiu_poisoning(image, patch=self.patch, shape=None, percentage=self.percentage, masks=binary_masks, training=False)
         else:
             adv_img = image
 
@@ -180,6 +184,8 @@ class CustomPoisonMapperYOLO:
             adv_img = self.poison.pieceWise_poisoning(image, patch=self.patch, shape='ellipse', percentage=self.percentage, masks=binary_masks, training=False)
         elif self.poisoning_func == "shipCamou":
             adv_img = self.poison.shipCamou_poisoning(image, patch=self.patch, shape=None, percentage=self.percentage, masks=binary_masks, training=False)
+        elif self.poisoning_func == "chunLiu":
+            adv_img = self.poison.chunLiu_poisoning(image, patch=self.patch, shape=None, percentage=self.percentage, masks=binary_masks, training=False)
         else:
             adv_img = image
 

@@ -325,15 +325,15 @@ class Attack:
             logger.info(f"Using manual multi-GPU attack execution on CUDA devices: {self.device_ids}")
 
         if self.name == 'shapeShifter' or self.name == 'google':
-            patch_param = torch.randn(size=(3, 128, 128), device=self.device)
+            patch_param = torch.randn(size=(3, 32, 32), device=self.device)
         elif self.name == 'Dpatch':
-            patch_param = torch.randn(size=(3, 128, 128), device=self.device)
+            patch_param = torch.randn(size=(3, 32, 32), device=self.device)
         elif self.name == 'scaleAdaptive':
-            patch_param = torch.randn(size=(3, 128, 128), device=self.device)
+            patch_param = torch.randn(size=(3, 32, 32), device=self.device)
         elif self.name == 'shipCamou':
-            patch_param = torch.randn(size=(3, 128, 128), device=self.device)
+            patch_param = torch.randn(size=(3, 64, 64), device=self.device)
         elif self.name == 'chunLiu':
-            patch_param = torch.randn(size=(3, 128, 128), device=self.device)
+            patch_param = torch.randn(size=(3, 64, 64), device=self.device)
         elif self.name == 'shapeAware':
             patch_param = torch.randn(size=(3, 768, 768), device=self.device)
         else:
