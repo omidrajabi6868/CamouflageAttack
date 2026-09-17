@@ -8,7 +8,7 @@
 #SBATCH --gres=gpu:2
 #SBATCH --time=6-12:00:00  
 
-usr/bin/true
+/usr/bin/true
 enable_lmod
 module load container_env pytorch-gpu/2.2.0
 crun python TheMain.py \

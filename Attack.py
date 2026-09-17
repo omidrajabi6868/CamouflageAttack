@@ -1,8 +1,9 @@
 import numpy as np
 import cv2
+import copy
 import torch
 import random
-from torch.nn.parallel import parallel_apply, replicate
+from torch.nn.parallel import parallel_apply
 
 from detectron2.structures import ImageList
 from detectron2.utils.events import EventStorage, get_event_storage
@@ -51,6 +52,11 @@ class Attack:
         # GradNorm is memory intensive because it relies on higher-order gradients.
         # Update GradNorm weights less frequently to reduce peak memory pressure.
         self.gradnorm_update_interval = 2
+        # ``torch.nn.parallel.replicate`` can leave frozen Detectron2 parameters
+        # on the source GPU (the victim's parameters are frozen below).  Keep
+        # explicit per-device copies instead so every replica's parameters and
+        # buffers are guaranteed to match the device receiving its inputs.
+        self._module_replica_cache = {}
 
     def _active_device_ids(self, batch_len=None):
         if not self.device_ids:
@@ -85,7 +91,15 @@ class Attack:
             return [module(*inputs_by_device[0])]
 
         used_device_ids = [self._device_index_from_input(inputs[0]) for inputs in inputs_by_device]
-        replicas = replicate(module, used_device_ids)
+        replicas = [module]
+        for device_id in used_device_ids[1:]:
+            cache_key = (id(module), device_id)
+            replica = self._module_replica_cache.get(cache_key)
+            if replica is None:
+                replica = copy.deepcopy(module).to(torch.device(f'cuda:{device_id}'))
+                self._module_replica_cache[cache_key] = replica
+            replica.train(module.training)
+            replicas.append(replica)
         return parallel_apply(replicas, inputs_by_device, devices=used_device_ids)
 
     def _model_forward(self, model, adversarial_chunks):
@@ -259,17 +273,23 @@ class Attack:
   
     def gradnorm_penalty(self, task_losses, loss_weights, patch_params, L0, alpha=0.5):
         """
-        Returns a scalar GradNorm penalty.  No tensor is modified in-place and
-        the gradient graph is preserved so the loss weights can be updated.
+        Return a GradNorm penalty without constructing second-order model
+        gradients.
+
+        Since d(w_i * L_i)/dW = w_i * dL_i/dW, only the norm of dL_i/dW
+        needs to be measured from the attack graph.  Treating that norm as a
+        constant still leaves the penalty differentiable with respect to
+        ``loss_weights`` and avoids retaining seven very large higher-order
+        graphs for the detector, segmenter, and renderer.
         """
         g_norm = []
 
         for i, Li in enumerate(task_losses):
             gi = torch.autograd.grad(
-                loss_weights[i] * Li,
+                Li,
                 patch_params,
                 retain_graph=True,
-                create_graph=True,
+                create_graph=False,
                 allow_unused=True
             )
             # allow_unused = True handles rare params not touched by a task.
@@ -278,7 +298,8 @@ class Attack:
             for g in gi:
                 if g is not None:
                     sq_norm = sq_norm + g.pow(2).sum()
-            g_norm.append(torch.sqrt(sq_norm + 1e-12))
+            base_norm = torch.sqrt(sq_norm + 1e-12).detach()
+            g_norm.append(loss_weights[i].abs() * base_norm)
             del gi, sq_norm  # free right away
 
         g_norm = torch.stack(g_norm)                 # (N_TASKS,)
@@ -318,6 +339,7 @@ class Attack:
 
     def conduct_attack(self, victim_model, detection_net=None):
 
+        self._module_replica_cache.clear()
         victim_model = victim_model.to(self.device)
         for parameter in victim_model.parameters():
             parameter.requires_grad_(False)
@@ -555,7 +577,7 @@ class Attack:
                     if self.attack_loss == "grad_norm":
                         if gradnorm_loss is not None:
                             optim_w.zero_grad(set_to_none=True)
-                            gradnorm_loss.backward(retain_graph=True)
+                            gradnorm_loss.backward()
                             optim_w.step() 
                             with torch.no_grad():
                                 loss_weights.data.clamp_(min=1e-8)
