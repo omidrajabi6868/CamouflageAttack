@@ -273,17 +273,23 @@ class Attack:
   
     def gradnorm_penalty(self, task_losses, loss_weights, patch_params, L0, alpha=0.5):
         """
-        Returns a scalar GradNorm penalty.  No tensor is modified in-place and
-        the gradient graph is preserved so the loss weights can be updated.
+        Return a GradNorm penalty without constructing second-order model
+        gradients.
+
+        Since d(w_i * L_i)/dW = w_i * dL_i/dW, only the norm of dL_i/dW
+        needs to be measured from the attack graph.  Treating that norm as a
+        constant still leaves the penalty differentiable with respect to
+        ``loss_weights`` and avoids retaining seven very large higher-order
+        graphs for the detector, segmenter, and renderer.
         """
         g_norm = []
 
         for i, Li in enumerate(task_losses):
             gi = torch.autograd.grad(
-                loss_weights[i] * Li,
+                Li,
                 patch_params,
                 retain_graph=True,
-                create_graph=True,
+                create_graph=False,
                 allow_unused=True
             )
             # allow_unused = True handles rare params not touched by a task.
@@ -292,7 +298,8 @@ class Attack:
             for g in gi:
                 if g is not None:
                     sq_norm = sq_norm + g.pow(2).sum()
-            g_norm.append(torch.sqrt(sq_norm + 1e-12))
+            base_norm = torch.sqrt(sq_norm + 1e-12).detach()
+            g_norm.append(loss_weights[i].abs() * base_norm)
             del gi, sq_norm  # free right away
 
         g_norm = torch.stack(g_norm)                 # (N_TASKS,)
@@ -570,7 +577,7 @@ class Attack:
                     if self.attack_loss == "grad_norm":
                         if gradnorm_loss is not None:
                             optim_w.zero_grad(set_to_none=True)
-                            gradnorm_loss.backward(retain_graph=True)
+                            gradnorm_loss.backward()
                             optim_w.step() 
                             with torch.no_grad():
                                 loss_weights.data.clamp_(min=1e-8)
