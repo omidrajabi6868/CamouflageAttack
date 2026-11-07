@@ -84,5 +84,16 @@ See `run.txt` for additional detector and loss configurations.
 - Default paths in the CLI are environment-specific; pass explicit paths for portable runs.
 
 ## Citation
-
-If this repository supports published work, add the final paper citation and DOI here so experiments can be attributed correctly.
+@Article{electronics15204610,
+AUTHOR = {Rajabi Rostami, Omid and Islam, Kazi Aminul and Zhu, Liuwan and Ning, Rui and Xin, Chunsheng and Wu, Hongyi and Li, Jiang},
+TITLE = {Stabilized Multi-Objective Optimization for Camouflage Attack in Remote Sensing},
+JOURNAL = {Electronics},
+VOLUME = {15},
+YEAR = {2026},
+NUMBER = {20},
+ARTICLE-NUMBER = {4610},
+URL = {https://www.mdpi.com/2079-9292/15/20/4610},
+ISSN = {2079-9292},
+ABSTRACT = {We investigate the vulnerability of multi-task maritime surveillance systems in which object detection and semantic segmentation operate concurrently. We propose Stabilized Multi-Objective Optimization (SMO), a framework that jointly targets Mask R-CNN and U-Net with a single universal adversarial texture in a digital white-box setting, with additional cross-model transfer evaluation. SMO combines a logarithmic-inversion loss transformation, feature inconsistency, and a systematic comparison of six optimization strategies for seven heterogeneous objectives. The loss transformation controls loss-dependent gradient scaling, while a U-Net generator supplies a spatially coherent texture and a hull-aligned application function accommodates target geometry without explicit Expectation over Transformation (EoT) sampling. Experiments on Airbus Ship Detection, Dataset for Object Detection in Aerial Images (DOTA), and Vision Meets Drone (VisDrone) demonstrate substantial reductions in average precision (AP) and mean intersection over union (mIoU). Together, these results demonstrate the effectiveness of SMO’s joint optimization framework in generating a single adversarial texture that disrupts heterogeneous detection and segmentation models, revealing vulnerabilities in integrated remote-sensing perception systems.},
+DOI = {10.3390/electronics15204610}
+}
